@@ -1,21 +1,24 @@
 
-// ==================== Machinima camera path tool (BullDigga / HP2 Machinima Tool) ====================
+// ==================== Machinima camera path tool v2 (BullDigga / HP2 Machinima Tool) ====================
 
 struct PathKey
 {
 	var vector vLoc;
 	var rotator rRot;
+	var float fFOV;
 };
 
 var array<PathKey> PathKeys;
 var float fPathElapsed;
 var float fPathDuration;
+var config string SavedPathData;
 
 function PathAddKey()
 {
 	local PathKey K;
 	K.vLoc = vCurrPosition;
 	K.rRot = rCurrRotation;
+	K.fFOV = PlayerHarry.FovAngle;
 	PathKeys[PathKeys.Length] = K;
 	PlayerHarry.ClientMessage("Path: key "$PathKeys.Length$" added");
 }
@@ -24,6 +27,43 @@ function PathClearKeys()
 {
 	PathKeys.Remove(0, PathKeys.Length);
 	PlayerHarry.ClientMessage("Path: all keys cleared");
+}
+
+function PathDeleteKey(int i)
+{
+	if ( i < 0 || i >= PathKeys.Length )
+	{
+		PlayerHarry.ClientMessage("Path: bad index "$i$" (have "$PathKeys.Length$")");
+		return;
+	}
+	PathKeys.Remove(i, 1);
+	PlayerHarry.ClientMessage("Path: key "$i$" removed ("$PathKeys.Length$" left)");
+}
+
+function PathGotoKey(int i)
+{
+	if ( i < 0 || i >= PathKeys.Length )
+	{
+		PlayerHarry.ClientMessage("Path: bad index "$i$" (have "$PathKeys.Length$")");
+		return;
+	}
+	if ( IsInState('StatePathPlaying') )
+	{
+		GotoState('StateFreeCam');
+	}
+	vCurrPosition = PathKeys[i].vLoc;
+	vDestPosition = PathKeys[i].vLoc;
+	rCurrRotation = PathKeys[i].rRot;
+	rDestRotation = PathKeys[i].rRot;
+	DesiredRotation = rDestRotation;
+	SetLocation(vCurrPosition);
+	SetRotation(rCurrRotation);
+	PlayerHarry.FovAngle = PathKeys[i].fFOV;
+	if ( !IsInState('StateFreeCam') )
+	{
+		GotoState('StateFreeCam');
+	}
+	PlayerHarry.ClientMessage("Path: jumped to key "$i);
 }
 
 function PathListKeys()
@@ -36,7 +76,7 @@ function PathListKeys()
 	}
 	for ( i = 0; i < PathKeys.Length; i++ )
 	{
-		PlayerHarry.ClientMessage("Path key "$i$": "$string(PathKeys[i].vLoc)$" rot "$string(PathKeys[i].rRot));
+		PlayerHarry.ClientMessage("Path key "$i$": "$string(PathKeys[i].vLoc)$" rot "$string(PathKeys[i].rRot)$" fov "$PathKeys[i].fFOV);
 	}
 }
 
@@ -64,6 +104,89 @@ function PathPlayPath(float fDuration)
 	fPathElapsed = 0.0;
 	GotoState('StatePathPlaying');
 	PlayerHarry.ClientMessage("Path: playing "$fPathDuration$"s over "$PathKeys.Length$" keys");
+}
+
+// --- ini persistence (config string SavedPathData) ---
+
+function PathExportIni()
+{
+	local int i;
+	local string s;
+	for ( i = 0; i < PathKeys.Length; i++ )
+	{
+		s = s $ PathKeys[i].vLoc.X $ "," $ PathKeys[i].vLoc.Y $ "," $ PathKeys[i].vLoc.Z
+			$ "," $ PathKeys[i].rRot.Yaw $ "," $ PathKeys[i].rRot.Pitch
+			$ "," $ PathKeys[i].fFOV;
+		if ( i < PathKeys.Length - 1 )
+		{
+			s = s $ ";";
+		}
+	}
+	SavedPathData = s;
+	SaveConfig();
+	PlayerHarry.ClientMessage("Path: exported "$PathKeys.Length$" keys to ini");
+}
+
+function PathImportIni()
+{
+	local string s, sItem;
+	local int i, p;
+	local PathKey K;
+	local float fx, fy, fz, fyaw, fpitch, ffov;
+
+	PathKeys.Remove(0, PathKeys.Length);
+	s = SavedPathData;
+	if ( s == "" )
+	{
+		PlayerHarry.ClientMessage("Path: ini data is empty");
+		return;
+	}
+	while ( true )
+	{
+		p = InStr(s, ";");
+		if ( p >= 0 )
+		{
+			sItem = Left(s, p);
+			s = Mid(s, p + 1);
+		}
+		else
+		{
+			sItem = s;
+			s = "";
+		}
+		if ( sItem != "" )
+		{
+			i = InStr(sItem, ",");
+			fx = float(Left(sItem, i));
+			sItem = Mid(sItem, i + 1);
+			i = InStr(sItem, ",");
+			fy = float(Left(sItem, i));
+			sItem = Mid(sItem, i + 1);
+			i = InStr(sItem, ",");
+			fz = float(Left(sItem, i));
+			sItem = Mid(sItem, i + 1);
+			i = InStr(sItem, ",");
+			fyaw = float(Left(sItem, i));
+			sItem = Mid(sItem, i + 1);
+			i = InStr(sItem, ",");
+			fpitch = float(Left(sItem, i));
+			sItem = Mid(sItem, i + 1);
+			ffov = float(sItem);
+
+			K.vLoc.X = fx;
+			K.vLoc.Y = fy;
+			K.vLoc.Z = fz;
+			K.rRot.Yaw = int(fyaw);
+			K.rRot.Pitch = int(fpitch);
+			K.fFOV = ffov;
+			PathKeys[PathKeys.Length] = K;
+		}
+		if ( p < 0 )
+		{
+			break;
+		}
+	}
+	PlayerHarry.ClientMessage("Path: imported "$PathKeys.Length$" keys from ini");
 }
 
 state StatePathPlaying
@@ -141,6 +264,10 @@ state StatePathPlaying
 		vDestPosition = vPos;
 		vCurrPosition = vPos;
 
+		// FOV interpolation
+		PlayerHarry.FovAngle = PathKeys[i].fFOV
+			+ (PathKeys[i+1].fFOV - PathKeys[i].fFOV) * fU;
+
 		if ( fT >= 1.0 )
 		{
 			GotoState('StateFreeCam');
@@ -148,5 +275,5 @@ state StatePathPlaying
 	}
 }
 
-// ==================== end machinima camera path tool ====================
+// ==================== end machinima camera path tool v2 ====================
 
