@@ -1,2 +1,4 @@
 "*.u"  
 "*.uc.bak"  
+Src/HP2UScriptDecompile/  
+ucc-make.log  
