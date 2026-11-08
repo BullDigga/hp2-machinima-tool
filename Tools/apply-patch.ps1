@@ -6,6 +6,7 @@ $root = "C:\Users\Kolya\.zcode\workspace\4f19d2d1-d433-4180-8864-acf7c24ed6f5\hp
 $include = "C:\Users\Kolya\.zcode\workspace\4f19d2d1-d433-4180-8864-acf7c24ed6f5\hp2-machinima-tool\Patches\PathSystem.include.uc"
 
 $block = Get-Content $include -Raw
+$decl = Get-Content "C:\Users\Kolya\.zcode\workspace\4f19d2d1-d433-4180-8864-acf7c24ed6f5\hp2-machinima-tool\Patches\PathSystem.decl.uc" -Raw
 $beginMark = "// ==================== Machinima camera path tool"
 $endMark = "// ==================== end machinima camera path tool"
 $endMark2 = "// ==================== end machinima camera path tool v2"
@@ -33,11 +34,22 @@ function Remove-OldBlock([string]$text) {
 $f = Join-Path $root "BaseCam.uc"
 $t = Get-Content $f -Raw
 $t = Remove-OldBlock $t
+# удалить старые объявления, если остались (idempotent)
+$t = $t -replace "(?s)\r?\n// ==================== Machinima camera path tool v2 \(declarations\)\r?\n.*?var float fPathDuration;\r?\n\r?\n", "`r`n"
+# объявления: struct + vars идут ПЕРЕД struct CamSettings (правило UC1: struct в начале класса)
+if ( $t -notmatch "struct PathKey" )
+{
+    $j = $t.IndexOf("struct CamSettings")
+    if ( $j -lt 0 ) { throw "struct CamSettings not found in BaseCam.uc" }
+    $t = $t.Insert($j, $decl)
+    Write-Output "BaseCam.uc: declarations inserted at $j"
+}
+# код: функции + стейт перед defaultproperties
 $i = $t.IndexOf("defaultproperties")
 if ( $i -lt 0 ) { throw "defaultproperties not found in BaseCam.uc" }
 $t = $t.Insert($i, $block)
 Set-Content -Path $f -Value $t -Encoding ASCII
-Write-Output "BaseCam.uc: block v2 installed"
+Write-Output "BaseCam.uc: code block v2 installed"
 
 # --- HPConsole.uc ---
 $f2 = Join-Path $root "Internal\HPConsole.uc"

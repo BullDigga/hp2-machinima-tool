@@ -1,17 +1,5 @@
 
-// ==================== Machinima camera path tool v2 (BullDigga / HP2 Machinima Tool) ====================
-
-struct PathKey
-{
-	var vector vLoc;
-	var rotator rRot;
-	var float fFOV;
-};
-
-var array<PathKey> PathKeys;
-var float fPathElapsed;
-var float fPathDuration;
-var config string SavedPathData;
+// ==================== Machinima camera path tool v2 code (BullDigga / HP2 Machinima Tool) ====================
 
 function PathAddKey()
 {
@@ -123,7 +111,8 @@ function PathExportIni()
 		}
 	}
 	SavedPathData = s;
-	SaveConfig();
+	// пишем в ini той же командой, что и меню игры (SaveConfig у спавненных акторов не работает)
+	PlayerHarry.ConsoleCommand("set ini:HGame.BaseCam SavedPathData " $ s);
 	PlayerHarry.ClientMessage("Path: exported "$PathKeys.Length$" keys to ini");
 }
 
@@ -275,5 +264,7 @@ state StatePathPlaying
 	}
 }
 
-// ==================== end machinima camera path tool v2 ====================
+// ==================== end machinima camera path tool v2 code ====================
+
+
 
