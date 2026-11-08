@@ -111,8 +111,9 @@ function PathExportIni()
 		}
 	}
 	SavedPathData = s;
-	// пишем в ini той же командой, что и меню игры (SaveConfig у спавненных акторов не работает)
-	PlayerHarry.ConsoleCommand("set ini:HGame.BaseCam SavedPathData " $ s);
+	// пишем через class-defaults: static SaveConfig кладёт [HGame.BaseCam] в Default.ini
+	Class'HGame.BaseCam'.default.SavedPathData = s;
+	Class'HGame.BaseCam'.static.SaveConfig();
 	PlayerHarry.ClientMessage("Path: exported "$PathKeys.Length$" keys to ini");
 }
 
@@ -125,6 +126,10 @@ function PathImportIni()
 
 	PathKeys.Remove(0, PathKeys.Length);
 	s = SavedPathData;
+	if ( s == "" )
+	{
+		s = Class'HGame.BaseCam'.default.SavedPathData;
+	}
 	if ( s == "" )
 	{
 		PlayerHarry.ClientMessage("Path: ini data is empty");

@@ -139,11 +139,10 @@ function Send-GameCommand([string]$cmd) {
 
 function Find-PathIni {
     $candidates = @(
-        "F:\Harry Potter and the Chamber of Secrets\system\User.ini",
         "F:\Harry Potter and the Chamber of Secrets\system\Default.ini",
-        "C:\Users\$env:USERNAME\Documents\Harry - Coding Evolved\User.ini",
+        "F:\Harry Potter and the Chamber of Secrets\system\User.ini",
         "C:\Users\$env:USERNAME\Documents\Harry - Coding Evolved\Default.ini",
-        "C:\Users\$env:USERNAME\AppData\Local\VirtualStore\F:\Harry Potter and the Chamber of Secrets\system\User.ini",
+        "C:\Users\$env:USERNAME\Documents\Harry - Coding Evolved\User.ini",
         "C:\Users\$env:USERNAME\AppData\Local\VirtualStore\F:\Harry Potter and the Chamber of Secrets\system\Default.ini"
     )
     foreach ($p in $candidates) {
