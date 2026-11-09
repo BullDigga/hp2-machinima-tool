@@ -309,6 +309,7 @@ $script:SeenSeqs = @{}      # "<gamepid>:<seq>" кадра -> seen
 $script:KeyTimes = @{}      # "<gamepid>:<seq>" кадра -> "HH:mm:ss" времени постановки
 $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
+$script:CurrentMap = "(no map)"
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
 $script:KeyTimesFile = Join-Path $PSScriptRoot "key-times.txt"
 if ( Test-Path $script:KeyTimesFile ) {
@@ -482,6 +483,11 @@ function Sync-FromLog([switch]$Force) {
             foreach ( $k in $script:KeyTimes.Keys ) { $lines += "$k|$($script:KeyTimes[$k])" }
             try { [System.IO.File]::WriteAllLines($script:KeyTimesFile, $lines) } catch { }
         }
+
+        # текущая карта - из событий LoadMap в логе
+        $lm = [regex]::Match($txt, 'LoadMap: ([A-Za-z0-9_]+)')
+        if ( $lm.Success ) { $script:CurrentMap = $lm.Groups[1].Value }
+        $controls['TbMap'].Text = $script:CurrentMap
     }
 
     $script:KeyRows = $rows
@@ -621,18 +627,16 @@ function Send-PathSaveAndSync([string]$prefix) {
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
-      <Button Name="BtnTheme" Grid.Column="2" Content="🌙" Width="34" Height="30" FontSize="14" BorderThickness="0"
+      <Button Name="BtnTheme" Grid.Column="2" Content="☀" Width="34" Height="30" FontSize="14" BorderThickness="0"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnClose" Grid.Column="3" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
     <!-- game view helpers -->
-    <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,6">
+    <UniformGrid Grid.Row="1" Columns="2" Margin="0,0,0,6">
       <Button Name="BtnHudHide" Content="🙈  Hide HUD" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnHudShow" Content="👁  Show HUD" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnCam9" Content="🎥  CamMode 9" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnEscMenu" Content="⏏  Esc (close menu)" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
     </UniformGrid>
 
     <!-- main action -->
@@ -654,20 +658,29 @@ function Send-PathSaveAndSync([string]$prefix) {
               Foreground="White" FontSize="16" FontWeight="Bold"/>
     </Grid>
 
-    <!-- play by speeds -->
-    <Button Name="BtnPathPlaySpeed" Grid.Row="4" Content="▶  PLAY (by keyframe SPEEDS)" Height="46" Margin="3,0,3,6"
-            Background="#CBA6F7" Foreground="#1E1E2E" FontSize="16" FontWeight="Bold"/>
+    <!-- play by speeds (3/4) + stop (1/4) -->
+    <Grid Grid.Row="4" Margin="3,0,3,6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="3*"/>
+        <ColumnDefinition Width="1*"/>
+      </Grid.ColumnDefinitions>
+      <Button Name="BtnPathPlaySpeed" Content="▶  PLAY (by keyframe SPEEDS)" Height="46" Margin="0,0,6,0"
+              Background="#CBA6F7" Foreground="#1E1E2E" FontSize="16" FontWeight="Bold"/>
+      <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Height="46" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+    </Grid>
 
-    <!-- stop / list / clear -->
-    <UniformGrid Grid.Row="5" Columns="3" Margin="3,0,3,8">
-      <Button Name="BtnPathStop" Content="■  Stop" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnPathList" Content="≡  List" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnPathClear" Content="🗑  Clear table" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
-    </UniformGrid>
+    <!-- clear -->
+    <Button Name="BtnPathClear" Grid.Row="5" Content="🗑  Clear table" Height="34" Margin="3,0,3,8"
+            Background="#EB6F8E" Foreground="White"/>
 
-    <!-- keyframes table -->
+    <!-- keyframes table + map/export panel -->
     <TextBlock Grid.Row="6" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
-    <DataGrid Name="DgKeys" Grid.Row="7" Height="170" Margin="3,0,3,6" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
+    <Grid Grid.Row="7" Margin="3,0,3,6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="3*"/>
+        <ColumnDefinition Width="1*"/>
+      </Grid.ColumnDefinitions>
+      <DataGrid Name="DgKeys" Height="170" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
@@ -684,6 +697,16 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
       </DataGrid.Columns>
     </DataGrid>
+      <StackPanel Grid.Column="1" Margin="10,0,0,0">
+        <TextBlock Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
+        <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
+                   TextWrapping="Wrap" Margin="2,0,0,10"/>
+        <Button Name="BtnExport" Content="⤴  Export to file" Height="34" Margin="0,0,0,6"
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+        <Button Name="BtnImport" Content="⤵  Import from file" Height="34"
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      </StackPanel>
+    </Grid>
 
     <!-- table actions -->
     <UniformGrid Grid.Row="8" Columns="3" Margin="3,0,3,6">
@@ -736,7 +759,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnHudShow','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','BtnExport','BtnImport','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -764,15 +787,6 @@ function Do-PathPlayTime {
     if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
     Set-Status (Send-GameCommand "PathPlay $sec")
 }
-function Send-EscKey {
-    if ( -not (Activate-Game) ) {
-        Set-Status "game window not found!"
-        return
-    }
-    [GameCtl]::Tap(0x1B)   # Escape
-    Set-Status "Esc sent to game"
-}
-
 # HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ: панель помнит состояние и шлёт команду только при смене
 $script:HudHidden = $false
 $controls['BtnHudHide'].Add_Click({
@@ -785,13 +799,10 @@ $controls['BtnHudShow'].Add_Click({
     $script:HudHidden = $false
     Set-Status (Send-GameCommand "HideHud")
 })
-$controls['BtnCam9'].Add_Click({ Set-Status (Send-GameCommand "Cam_Mode 9") })
-$controls['BtnEscMenu'].Add_Click({ Send-EscKey })
 $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
 $controls['BtnPathPlay'].Add_Click({ Do-PathPlayTime })
 $controls['BtnPathPlaySpeed'].Add_Click({ Do-PathPlay })
 $controls['BtnPathStop'].Add_Click({ Set-Status (Send-GameCommand "PathStop") })
-$controls['BtnPathList'].Add_Click({ Set-Status (Send-GameCommand "PathList") })
 $controls['BtnPathClear'].Add_Click({
     $st = Send-GameCommand "PathClear"
     Sync-AfterCommand $st
@@ -856,6 +867,46 @@ $controls['BtnSpeedAll'].Add_Click({
     for ( $i = 0; $i -lt $script:KeyRows.Count; $i++ ) { $cmds += "PathSetKeySpeed $i $sp" }
     $st = Send-GameCommands $cmds
     Sync-AfterCommand $st
+})
+
+# ---------- export / import keyframes ----------
+$controls['BtnExport'].Add_Click({
+    if ( $script:KeyRows.Count -eq 0 ) { Set-Status "no keyframes to export"; return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "HP2 path (*.hp2path)|*.hp2path|All files (*.*)|*.*"
+    $dlg.FileName = "$($script:CurrentMap).hp2path"
+    if ( $dlg.ShowDialog() ) {
+        $lines = @("# map=$($script:CurrentMap)  format: x,y,z,yaw,pitch,fov,speed")
+        foreach ( $r in $script:KeyRows ) {
+            $lines += ("{0},{1},{2},{3},{4},{5},{6}" -f $r.X, $r.Y, $r.Z, $r.Yaw, $r.Pitch, $r.FOV, $r.Speed)
+        }
+        try {
+            [System.IO.File]::WriteAllLines($dlg.FileName, $lines)
+            Set-Status "exported $($script:KeyRows.Count) keys -> $($dlg.FileName)"
+        } catch { Set-Status "export failed: $($_.Exception.Message)" }
+    }
+})
+$controls['BtnImport'].Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "HP2 path (*.hp2path)|*.hp2path|All files (*.*)|*.*"
+    if ( $dlg.ShowDialog() ) {
+        try {
+            $lines = [System.IO.File]::ReadAllLines($dlg.FileName) | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") }
+        } catch { Set-Status "import failed: $($_.Exception.Message)"; return }
+        $cmds = @("PathClear")
+        $n = 0
+        foreach ( $ln in $lines ) {
+            $p = $ln.Trim() -split ','
+            if ( $p.Count -ge 7 ) {
+                $cmds += ("PathAddXYZ {0} {1} {2} {3} {4} {5} {6}" -f $p[0], $p[1], $p[2], $p[3], $p[4], $p[5], $p[6])
+                $n++
+            }
+        }
+        if ( $n -eq 0 ) { Set-Status "no valid keyframe lines in file"; return }
+        $script:StampNextSync = $true
+        $st = Send-GameCommands $cmds
+        Sync-AfterCommand "imported $n keys from $([System.IO.Path]::GetFileName($dlg.FileName)) | $st"
+    }
 })
 # прозрачность панели (честная: AllowsTransparency)
 $controls['CbTransparent'].Add_Checked({   $window.Opacity = 0.8; Set-Status "panel transparent (80%)" })
@@ -938,8 +989,12 @@ function Set-Theme([bool]$dark) {
     foreach ( $k in $map.Keys ) {
         $window.Resources[$k] = [Windows.Media.SolidColorBrush][Windows.Media.ColorConverter]::ConvertFromString($map[$k])
     }
-    $controls['BtnTheme'].Content = "🌙"
-    if ( -not $dark ) { $controls['BtnTheme'].Content = "☀" }
+    # иконка = то, НА что переключаемся: в тёмной теме показываем солнце, в светлой - луну
+    $controls['BtnTheme'].Content = "☀"
+    if ( -not $dark ) { $controls['BtnTheme'].Content = "🌙" }
+    # FOV/Fly speed боксы держат кисть напрямую - перерисовать под текущую тему
+    Update-ParamBox "fov"
+    Update-ParamBox "speed"
 }
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
