@@ -276,10 +276,6 @@ function Focus-GameWindow([IntPtr]$h) {
 
 function Send-GameCommands([string[]]$cmds) {
     Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
-    # v5.12: после команды ждём новое событие; если быстрый скан его не увидел
-    # (хвост буфера лога уехал из кэшированных областей) - Complete запустит полный рескан
-    $script:PendingFullSync = $true
-    $script:FullRetryDone = $false
     $h = Find-GameWindow
     if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
     if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
@@ -374,8 +370,6 @@ function Refresh-Table {
 $script:SyncBusy = $false
 $script:SyncForce = $false
 $script:LastScanFast = $false
-$script:PendingFullSync = $false
-$script:FullRetryDone = $false
 
 function Sync-FromLog([switch]$Force) {
     # v5.8: асинхронно - скан памяти в C#-потоке, UI и крутящийся ⟳ живут.
@@ -431,17 +425,12 @@ function Complete-SyncFromLog {
         Set-Status "no keyframe source - is the game running?"
         return
     }
-    # v5.10: быстрый скан вернулся пустым = кэш областей устарел (буфер лога переехал).
-    # Инвалидировать кэш и выйти, НЕ трогая таблицу (иначе она опустошается).
+    # v5.16.1: быстрый скан вернулся пустым = кэш областей устарел (буфер лога вырос
+    # и ПЕРЕВЫДЕЛИЛСЯ - новые события ушли из кэшированных адресов). Инвалидировать
+    # кэш и ВСЕГДА пересканировать полностью: иначе таблица зависает на старых данных.
     if ( $txt -eq "" -and $script:LastScanFast ) {
         $script:ScanCache.Regions = @()
-        # v5.12: после команды событие ОБЯЗАНО прийти - делаем один полный рескан
-        if ( $script:PendingFullSync -and -not $script:FullRetryDone ) {
-            $script:FullRetryDone = $true
-            $script:PendingFullSync = $false
-            Sync-FromLog -Force
-            return
-        }
+        Sync-FromLog -Force
         return
     }
     if ( $txt -ne "" ) {
@@ -624,9 +613,6 @@ function Complete-SyncFromLog {
         Refresh-Table
         Update-SelectionButtons
         Set-Status "table: $($rows.Count) keys (memory scan OK)"
-        # полный скан отработал с данными - флаги ретрая сброшены
-        $script:PendingFullSync = $false
-        $script:FullRetryDone = $false
     }
 }
 
