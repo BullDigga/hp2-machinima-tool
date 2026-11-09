@@ -113,24 +113,21 @@ public class MemScanPanel {
     public static string GetLogEvents(int pid) {
         IntPtr h = OpenProcess(0x0410, false, pid);
         if ( h == IntPtr.Zero ) return "|OPENFAILED";
-        // ---- пасс 1: разведка - ищем UTF-16LE "ScriptLog: PATH" (лог в памяти wide) ----
-        byte[] wprobe = System.Text.Encoding.Unicode.GetBytes("ScriptLog: PATH");
-        long bestAddr = 0; long bestSize = 0; int bestCount = -1;
+        // ---- пасс 1: разведка - ищем UTF-16LE "PATHEV:" по ВСЕМ областям ----
+        byte[] wprobe = System.Text.Encoding.Unicode.GetBytes("PATHEV:");
         long addr = 0x10000;
         MBI mbi;
         byte[] probe = new byte[0x400000];
-        long totRead = 0; long failCnt = 0; long regCnt = 0;
+        var hitRegs = new System.Collections.Generic.List<long>();  // пары addr,size
         while ( VirtualQueryEx(h, (IntPtr)addr, out mbi, (uint)Marshal.SizeOf(typeof(MBI))) != 0 ) {
             long size = mbi.RegionSize.ToInt64();
             if ( mbi.State == 0x1000 && size > 0 ) {
-                regCnt++;
                 int cnt = 0;
                 long off = 0;
                 while ( off < size ) {
                     IntPtr read;
                     int toRead = (int)Math.Min(size - off, probe.Length);
                     if ( ReadProcessMemory(h, (IntPtr)(mbi.BaseAddress.ToInt64() + off), probe, (IntPtr)toRead, out read) ) {
-                        totRead += read.ToInt64();
                         int n = read.ToInt32();
                         for ( int i = 0; i <= n - wprobe.Length; i++ ) {
                             if ( probe[i] != wprobe[0] || probe[i+1] != wprobe[1] ) continue;
@@ -138,52 +135,45 @@ public class MemScanPanel {
                             for ( int k = 2; k < wprobe.Length; k++ ) { if ( probe[i+k] != wprobe[k] ) { ok = false; break; } }
                             if ( ok ) { cnt++; i += wprobe.Length; }
                         }
-                    } else { failCnt++; }
+                    }
                     off += 0x400000;
                 }
-                if ( cnt > bestCount ) { bestCount = cnt; bestAddr = mbi.BaseAddress.ToInt64(); bestSize = size; }
+                if ( cnt > 0 ) { hitRegs.Add(mbi.BaseAddress.ToInt64()); hitRegs.Add(size); }
             }
             addr += size;
             if ( addr > 0x7FFFFFFEFFFF ) break;
         }
-        if ( bestCount <= 0 ) { CloseHandle(h); return "|BEST:" + bestCount + ",0 regs=" + regCnt + " read=" + totRead + " fail=" + failCnt + "\n"; }
-        // ---- пасс 2: извлечение wide-событий из лучшей области чанками с перекрытием ----
+        // ---- пасс 2: извлечение PATHEV из КАЖДОЙ области с попаданиями ----
+        // (в куче живёт несколько копий буфера лога; дедуп по seq делает панель)
         var sb = new System.Text.StringBuilder();
-        var seen = new System.Collections.Generic.HashSet<long>();
         int chunk = 0x400000;
         int overlap = 4096;
         byte[] buf = new byte[chunk + overlap];
-        long pos = 0;
-        while ( pos < bestSize ) {
-            int toRead = (int)Math.Min(bestSize - pos + overlap, buf.Length);
-            if ( toRead > bestSize - pos && bestSize - pos < buf.Length ) toRead = (int)(bestSize - pos);
-            IntPtr rd;
-            if ( ReadProcessMemory(h, (IntPtr)(bestAddr + pos), buf, (IntPtr)toRead, out rd) ) {
-                int n = rd.ToInt32();
-                string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
-                // только события с номером сессии: PATHEV:<seq>|TYPE|data
-                var marks = new System.Collections.Generic.List<long>();
-                for ( int i = s.IndexOf("PATHEV:"); i >= 0; i = s.IndexOf("PATHEV:", i + 7) ) { marks.Add(i); }
-                // сортировка вставками по позиции (мало элементов)
-                for ( int a = 1; a < marks.Count; a++ ) {
-                    long km = marks[a]; int b = a - 1;
-                    while ( b >= 0 && marks[b] > km ) { marks[b+1] = marks[b]; b--; }
-                    marks[b+1] = km;
+        for ( int r = 0; r < hitRegs.Count; r += 2 ) {
+            long regA = hitRegs[r];
+            long regS = hitRegs[r + 1];
+            var seen = new System.Collections.Generic.HashSet<long>();
+            long pos = 0;
+            while ( pos < regS ) {
+                int toRead = (int)Math.Min(regS - pos + overlap, buf.Length);
+                if ( toRead > regS - pos && regS - pos < buf.Length ) toRead = (int)(regS - pos);
+                IntPtr rd;
+                if ( ReadProcessMemory(h, (IntPtr)(regA + pos), buf, (IntPtr)toRead, out rd) ) {
+                    int n = rd.ToInt32();
+                    string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
+                    for ( int i = s.IndexOf("PATHEV:"); i >= 0; i = s.IndexOf("PATHEV:", i + 7) ) {
+                        long abs = (pos >> 1) + i;
+                        if ( !seen.Add(abs) ) continue;
+                        int en = i;
+                        while ( en < s.Length && s[en] >= 32 ) en++;
+                        sb.Append(s.Substring(i, en - i) + "\n");
+                    }
                 }
-                for ( int mi = 0; mi < marks.Count; mi++ ) {
-                    long abs = (pos >> 1) + marks[mi];   // абсолютная позиция в char'ах
-                    if ( !seen.Add(abs) ) continue;
-                    int st = (int)marks[mi];
-                    int en = st;
-                    while ( en < s.Length && s[en] >= 32 ) en++;
-                    string tok = s.Substring(st, en - st);
-                    sb.Append(tok + "\n");
-                }
+                pos += chunk;
             }
-            pos += chunk;
         }
         CloseHandle(h);
-        return "|BEST:" + bestCount + "," + bestSize + "\n" + sb.ToString();
+        return "|REGS:" + (hitRegs.Count / 2) + "\n" + sb.ToString();
     }
 }
 "@
@@ -400,7 +390,7 @@ function Send-PathSaveAndSync([string]$prefix) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="HP2 Machinima Panel" Width="560" SizeToContent="Height"
-        Topmost="True" Background="#1E1E2E" WindowStyle="ToolWindow"
+        Topmost="True" Background="#F21E1E2E" WindowStyle="None" AllowsTransparency="True"
         ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60">
   <Window.Resources>
     <Style TargetType="{x:Type DataGridColumnHeader}">
@@ -413,8 +403,16 @@ function Send-PathSaveAndSync([string]$prefix) {
     </Style>
   </Window.Resources>
   <StackPanel Margin="10">
-    <TextBlock Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
-               HorizontalAlignment="Center" Margin="0,0,0,2"/>
+    <Grid Margin="0,0,0,2">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="28"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Name="TbTitle" Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
+                 HorizontalAlignment="Center" Margin="0,0,28,0" Cursor="Hand"/>
+      <Button Name="BtnClose" Grid.Column="1" Content="X" Width="24" Height="22" FontWeight="Bold"
+              Background="#F38BA8" Foreground="#1E1E2E" BorderThickness="0"/>
+    </Grid>
     <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 Clear" Foreground="#F9E2AF"
                FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,2"/>
     <CheckBox Name="CbTransparent" Content="Transparent panel (see game behind)" Foreground="#A6ADC8"
@@ -482,7 +480,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','TbTitle','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -563,9 +561,12 @@ $controls['BtnSpeedAll'].Add_Click({
     $st = Send-GameCommands $cmds
     Sync-AfterCommand $st
 })
-# прозрачность панели
+# прозрачность панели (честная: AllowsTransparency)
 $controls['CbTransparent'].Add_Checked({   $window.Opacity = 0.55; Set-Status "panel transparent (55%)" })
 $controls['CbTransparent'].Add_Unchecked({ $window.Opacity = 1.0 })
+# свой заголовок: перетаскивание за надпись, крестик закрывает
+$controls['TbTitle'].Add_MouseLeftButtonDown({ try { $window.DragMove() } catch { } })
+$controls['BtnClose'].Add_Click({ $window.Close() })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
 $controls['DgKeys'].Add_CellEditEnding({
     param($sender, $e)
