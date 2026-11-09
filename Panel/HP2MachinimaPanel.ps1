@@ -350,6 +350,7 @@ function Refresh-Table {
 
 $script:SyncBusy = $false
 $script:SyncForce = $false
+$script:LastScanFast = $false
 
 function Sync-FromLog([switch]$Force) {
     # v5.8: асинхронно - скан памяти в C#-потоке, UI и крутящийся ⟳ живут.
@@ -366,19 +367,31 @@ function Sync-FromLog([switch]$Force) {
     if ( $gp -eq $null ) { Set-Status "no keyframe source - is the game running?"; return }
     $pairs = $null
     if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) { $pairs = [long[]]$script:ScanCache.Regions }
+    $script:LastScanFast = ($pairs -ne $null)
     $script:SyncBusy = $true
     $script:SyncForce = [bool]$Force
     [MemScanPanel]::StartAsync($gp.Id, $pairs)
 }
 
 function Complete-SyncFromLog {
+    param([string]$txtOverride = "")
     $script:SyncBusy = $false
+    [MemScanPanel]::AsyncState = 0
     $rows = New-Object System.Collections.ArrayList
-    $txt = [MemScanPanel]::AsyncResult
-    [MemScanPanel]::AsyncResult = ""
+    $txt = $txtOverride
+    if ( $txtOverride -eq "" ) {
+        $txt = [MemScanPanel]::AsyncResult
+        [MemScanPanel]::AsyncResult = ""
+    }
     $src = ""
     $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
     if ( $gp -eq $null ) { Set-Status "no keyframe source - is the game running?"; return }
+    # v5.10: быстрый скан вернулся пустым = кэш областей устарел (буфер лога переехал).
+    # Инвалидировать кэш и выйти, НЕ трогая таблицу (иначе она опустошается).
+    if ( $txt -eq "" -and $script:LastScanFast ) {
+        $script:ScanCache.Regions = @()
+        return
+    }
     if ( $txt -ne "" ) {
         if ( $txt.StartsWith("|REGS:") ) {
             # полный скан: первая строка = |REGS:n|addr|size|... - сохраняем области в кэш
@@ -528,12 +541,14 @@ function Complete-SyncFromLog {
         $lm = [regex]::Match($txt, 'LoadMap: ([A-Za-z0-9_]+)')
         if ( $lm.Success ) { $script:CurrentMap = $lm.Groups[1].Value }
         $controls['TbMap'].Text = Get-MapText
-    }
 
-    $script:KeyRows = $rows
-    Refresh-Table
-    Update-SelectionButtons
-    Set-Status "table: $($rows.Count) keys (memory scan OK)"
+        # v5.10: таблицу обновляем ТОЛЬКО когда есть данные - пустой результат
+        # (нет новых событий/источник умер) не должен опустошать уже показанные кадры
+        $script:KeyRows = $rows
+        Refresh-Table
+        Update-SelectionButtons
+        Set-Status "table: $($rows.Count) keys (memory scan OK)"
+    }
 }
 
 function Find-LogFile {
@@ -566,7 +581,7 @@ function Send-PathSaveAndSync([string]$prefix) {
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="HP2 Machinima Panel" Width="800" Height="640" MinWidth="800" MinHeight="460"
+        Title="HP2 Machinima Panel" Width="800" Height="640" MinWidth="800" MinHeight="550"
         Topmost="True" Background="{DynamicResource BgBrush}" WindowStyle="None" AllowsTransparency="True"
         ResizeMode="CanResize" WindowStartupLocation="Manual" Left="20" Top="60"
         FontFamily="Segoe UI">
@@ -714,11 +729,9 @@ function Send-PathSaveAndSync([string]$prefix) {
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
-    <!-- game view helpers -->
-    <UniformGrid Grid.Row="1" Columns="2" Margin="0,0,0,6">
-      <Button Name="BtnHudHide" Content="🙈  Hide HUD" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnHudShow" Content="👁  Show HUD" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-    </UniformGrid>
+    <!-- game view helpers: одна кнопка-переключатель (панель помнит состояние HUD) -->
+    <Button Name="BtnHudHide" Grid.Row="1" Content="🙈  Hide HUD" Height="34" Margin="3,0,3,6"
+            Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
 
     <!-- main action -->
     <Button Name="BtnPathAdd" Grid.Row="2" Content="📷  ADD KEYFRAME" Height="52" Margin="3,0,3,6"
@@ -813,7 +826,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
               Background="#EB6F8E" Foreground="White"
-              BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)"/>
+              BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)" ToolTipService.ShowOnDisabled="True"/>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
         <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
@@ -878,7 +891,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','RefreshRot','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','RefreshRot','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -976,16 +989,18 @@ function Do-PathPlayTime {
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback ([double]$sec) }
     Set-Status $st
 }
-# HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ: панель помнит состояние и шлёт команду только при смене
+# HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ; панель помнит состояние, кнопка одна и меняет подпись
 $script:HudHidden = $false
+function Update-HudButton {
+    $L = $null
+    if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
+    if ( $L -eq $null ) { return }
+    if ( $script:HudHidden ) { $controls['BtnHudHide'].Content = $L.HudShow }
+    else { $controls['BtnHudHide'].Content = $L.HudHide }
+}
 $controls['BtnHudHide'].Add_Click({
-    if ( $script:HudHidden ) { Set-Status "HUD is already hidden"; return }
-    $script:HudHidden = $true
-    Set-Status (Send-GameCommand "HideHud")
-})
-$controls['BtnHudShow'].Add_Click({
-    if ( -not $script:HudHidden ) { Set-Status "HUD is already shown"; return }
-    $script:HudHidden = $false
+    $script:HudHidden = -not $script:HudHidden
+    Update-HudButton
     Set-Status (Send-GameCommand "HideHud")
 })
 $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
@@ -1234,6 +1249,7 @@ function Update-SelectionButtons {
     $n = 0
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
     foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
+    $controls['BtnPathClear'].IsEnabled = ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = [bool]$script:Playing
     $L = $null
     if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
@@ -1309,8 +1325,7 @@ $script:Lang = "en"
 function Set-Lang([string]$lang) {
     $script:Lang = $lang
     $L = $script:LocData[$lang]
-    $controls['BtnHudHide'].Content = $L.HudHide
-    $controls['BtnHudShow'].Content = $L.HudShow
+    Update-HudButton
     $controls['BtnPathAdd'].Content = $L.AddKey
     $controls['BtnPathPlay'].Content = $L.PlayTime
     $controls['BtnPathPlaySpeed'].Content = $L.PlaySpeed
