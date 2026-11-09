@@ -535,6 +535,8 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="LineBrush" Color="#585B70"/>
     <SolidColorBrush x:Key="StatusBrush" Color="#94E2D5"/>
     <SolidColorBrush x:Key="DotBrush" Color="#A6E3A1"/>
+    <SolidColorBrush x:Key="SyncBrush" Color="#FF1F3D2E"/>
+    <SolidColorBrush x:Key="DirtyBrush" Color="#FF3A3F4D"/>
 
     <Style TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
@@ -599,6 +601,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
         <Image Name="ImgOwl" Width="26" Height="26" Margin="2,0,8,0"/>
@@ -606,7 +609,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       </StackPanel>
       <UniformGrid Grid.Column="1" Columns="4" VerticalAlignment="Center" Margin="0,0,10,0">
         <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  кадр"/></TextBlock>
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  frame"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
@@ -618,14 +621,16 @@ function Send-PathSaveAndSync([string]$prefix) {
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
-      <Button Name="BtnTheme" Grid.Column="2" Content="🌙" Width="34" Height="30" FontSize="14" BorderThickness="0"/>
+      <Button Name="BtnTheme" Grid.Column="2" Content="🌙" Width="34" Height="30" FontSize="14" BorderThickness="0"
+              Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnClose" Grid.Column="3" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
     <!-- game view helpers -->
-    <UniformGrid Grid.Row="1" Columns="3" Margin="0,0,0,6">
-      <Button Name="BtnHideHud" Content="👁  HideHud" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+    <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,6">
+      <Button Name="BtnHudHide" Content="🙈  Hide HUD" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Name="BtnHudShow" Content="👁  Show HUD" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnCam9" Content="🎥  CamMode 9" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnEscMenu" Content="⏏  Esc (close menu)" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
     </UniformGrid>
@@ -657,7 +662,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <UniformGrid Grid.Row="5" Columns="3" Margin="3,0,3,8">
       <Button Name="BtnPathStop" Content="■  Stop" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnPathList" Content="≡  List" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnPathClear" Content="🗑  Clear" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
+      <Button Name="BtnPathClear" Content="🗑  Clear table" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
     </UniformGrid>
 
     <!-- keyframes table -->
@@ -684,7 +689,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <UniformGrid Grid.Row="8" Columns="3" Margin="3,0,3,6">
       <Button Name="BtnRefresh" Content="⟳  Refresh table" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="#89DCEB"/>
       <Button Name="BtnGoto" Content="✛  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="#89DCEB"/>
-      <Button Name="BtnDel" Content="🗑  Delete selected" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
+      <Button Name="BtnDel" Content="🗑  Delete selected key" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
     </UniformGrid>
 
     <!-- parameters row -->
@@ -731,7 +736,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHudHide','BtnHudShow','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -745,6 +750,8 @@ function Do-PathAdd {
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     $script:StampNextSync = $true   # новый кадр получит время постановки
     $st = Send-GameCommands @("Cam_MoveSpeed $sp", "PathAdd")
+    $script:SpeedApplied = $sp
+    Update-ParamBox "speed"
     Sync-AfterCommand $st
 }
 function Do-PathPlay {
@@ -766,7 +773,18 @@ function Send-EscKey {
     Set-Status "Esc sent to game"
 }
 
-$controls['BtnHideHud'].Add_Click({ Set-Status (Send-GameCommand "HideHud") })
+# HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ: панель помнит состояние и шлёт команду только при смене
+$script:HudHidden = $false
+$controls['BtnHudHide'].Add_Click({
+    if ( $script:HudHidden ) { Set-Status "HUD is already hidden"; return }
+    $script:HudHidden = $true
+    Set-Status (Send-GameCommand "HideHud")
+})
+$controls['BtnHudShow'].Add_Click({
+    if ( -not $script:HudHidden ) { Set-Status "HUD is already shown"; return }
+    $script:HudHidden = $false
+    Set-Status (Send-GameCommand "HideHud")
+})
 $controls['BtnCam9'].Add_Click({ Set-Status (Send-GameCommand "Cam_Mode 9") })
 $controls['BtnEscMenu'].Add_Click({ Send-EscKey })
 $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
@@ -791,14 +809,33 @@ $controls['BtnDel'].Add_Click({
         Send-PathSaveAndSync $st
     } else { Set-Status "select a keyframe row first" }
 })
+# FOV / Fly speed: зелёный фон = значение применено к игре, серый = редактируется (Set доступен только тогда)
+$script:FovApplied = "90"
+$script:SpeedApplied = "500"
+function Update-ParamBox([string]$which) {
+    $box = if ( $which -eq "fov" ) { $controls['TbFov'] } else { $controls['TbSpeed'] }
+    $btn = if ( $which -eq "fov" ) { $controls['BtnSetFov'] } else { $controls['BtnSpeed'] }
+    $applied = if ( $which -eq "fov" ) { $script:FovApplied } else { $script:SpeedApplied }
+    $key = if ( $box.Text.Trim() -eq $applied ) { "SyncBrush" } else { "DirtyBrush" }
+    $box.Background = $window.Resources[$key]
+    $btn.IsEnabled = ($key -eq "DirtyBrush")
+}
+$controls['TbFov'].Add_TextChanged({ Update-ParamBox "fov" })
+$controls['TbSpeed'].Add_TextChanged({ Update-ParamBox "speed" })
+Update-ParamBox "fov"
+Update-ParamBox "speed"
 $controls['BtnSetFov'].Add_Click({
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
+    $script:FovApplied = $fov
+    Update-ParamBox "fov"
     Set-Status (Send-GameCommand "Cam_FOV $fov")
 })
 $controls['BtnSpeed'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
+    $script:SpeedApplied = $sp
+    Update-ParamBox "speed"
     Set-Status (Send-GameCommand "Cam_MoveSpeed $sp")
 })
 $controls['BtnKeySpeed'].Add_Click({
@@ -893,8 +930,8 @@ $window.Add_Closing({
 
 # ---------- theme toggle (dark default) ----------
 $script:DarkTheme = $true
-$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1" }
-$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44" }
+$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D" }
+$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8" }
 function Set-Theme([bool]$dark) {
     $map = $script:DarkBrushes
     if ( -not $dark ) { $map = $script:LightBrushes }
