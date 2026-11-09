@@ -521,100 +521,192 @@ function Send-PathSaveAndSync([string]$prefix) {
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="HP2 Machinima Panel" Width="560" SizeToContent="Height"
+        Title="HP2 Machinima Panel" Width="640" SizeToContent="Height"
         Topmost="True" Background="#F21E1E2E" WindowStyle="None" AllowsTransparency="True"
-        ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60">
+        ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60"
+        FontFamily="Segoe UI">
   <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border CornerRadius="8" Background="{TemplateBinding Background}"
+                    BorderBrush="#585B70" BorderThickness="0,0,0,1">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,4"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Opacity" Value="0.85"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Opacity" Value="0.65"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border CornerRadius="6" Background="{TemplateBinding Background}"
+                    BorderBrush="#585B70" BorderThickness="1">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="4,2" VerticalAlignment="Center"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="{x:Type DataGridColumnHeader}">
       <Setter Property="Background" Value="#313244"/>
       <Setter Property="Foreground" Value="#CDD6F4"/>
       <Setter Property="FontWeight" Value="Bold"/>
-      <Setter Property="Padding" Value="4,3"/>
+      <Setter Property="Padding" Value="6,4"/>
       <Setter Property="BorderBrush" Value="#585B70"/>
       <Setter Property="BorderThickness" Value="0,0,1,1"/>
     </Style>
   </Window.Resources>
-  <StackPanel Margin="10">
-    <Grid Name="HdrGrid" Background="Transparent" Margin="0,0,0,2">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="28"/>
-      </Grid.ColumnDefinitions>
-      <TextBlock Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
-                 HorizontalAlignment="Center" Margin="0,0,28,0"/>
-      <Button Name="BtnClose" Grid.Column="1" Content="X" Width="24" Height="22" FontWeight="Bold"
-              Background="#F38BA8" Foreground="#1E1E2E" BorderThickness="0"/>
-    </Grid>
-    <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 Clear" Foreground="#F9E2AF"
-               FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,2"/>
-    <UniformGrid Columns="3" Margin="0,0,0,4">
-      <Button Name="BtnHideHud" Content="HideHud" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnCam9" Content="Cam_Mode 9" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnEscMenu" Content="Esc (close menu)" Height="30" Margin="2" Background="#45475A" Foreground="#CDD6F4"/>
-    </UniformGrid>
-    <Button Name="BtnPathAdd" Content="ADD KEYFRAME (PathAdd)" Height="42" Margin="0,2" Background="#A6E3A1" Foreground="#1E1E2E"
-            FontSize="14" FontWeight="Bold"/>
-    <TextBlock Text="FLIGHT TIME, SEC (whole path in N seconds)" Foreground="#A6ADC8" FontSize="11" Margin="2,4,0,0"/>
-    <UniformGrid Columns="2" Margin="0,2,0,2">
-      <TextBox Name="TbSeconds" Text="15" Height="34" Margin="2,0" FontSize="14"
-               VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnPathPlay" Content="PLAY (by TIME)" Height="34" Margin="2,0" Background="#F9E2AF" Foreground="#1E1E2E"
-              FontSize="14" FontWeight="Bold"/>
-    </UniformGrid>
-    <Button Name="BtnPathPlaySpeed" Content="PLAY (by keyframe SPEEDS)" Height="34" Margin="0,2,0,0" Background="#F9E2AF"
-            Foreground="#1E1E2E" FontSize="14" FontWeight="Bold"/>
-    <UniformGrid Columns="3" Margin="0,4">
-      <Button Name="BtnPathStop" Content="Stop" Height="30" Margin="2" Background="#45475A" Foreground="#CDD6F4"/>
-      <Button Name="BtnPathList" Content="List" Height="30" Margin="2" Background="#45475A" Foreground="#CDD6F4"/>
-      <Button Name="BtnPathClear" Content="Clear" Height="30" Margin="2" Background="#F38BA8" Foreground="#1E1E2E"/>
-    </UniformGrid>
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
 
-    <TextBlock Text="KEYFRAMES (double-click = go to key; Speed editable)" Foreground="#A6ADC8" FontSize="11" Margin="2,8,0,2"/>
-    <DataGrid Name="DgKeys" Height="160" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A"
-              FontFamily="Consolas" FontSize="11" AutoGenerateColumns="False" CanUserAddRows="False"
-              CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
-              HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="#181825"
-              AlternatingRowBackground="#313244">
-      <DataGrid.Columns>
-        <DataGridTextColumn Header="#" Width="30" Binding="{Binding Num}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Time" Width="60" Binding="{Binding Time}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="X" Width="62" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Y" Width="62" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Z" Width="62" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Yaw" Width="54" Binding="{Binding Yaw}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Pitch" Width="48" Binding="{Binding Pitch}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="FOV" Width="44" Binding="{Binding FOV}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Speed" Width="52" Binding="{Binding Speed}" IsReadOnly="False"/>
-      </DataGrid.Columns>
-    </DataGrid>
-    <UniformGrid Columns="3" Margin="0,4">
-      <Button Name="BtnRefresh" Content="Refresh table" Height="30" Margin="2" Background="#89DCEB" Foreground="#1E1E2E"/>
-      <Button Name="BtnGoto" Content="Go to selected" Height="30" Margin="2" Background="#89DCEB" Foreground="#1E1E2E"/>
-      <Button Name="BtnDel" Content="Delete selected" Height="30" Margin="2" Background="#F38BA8" Foreground="#1E1E2E"/>
-    </UniformGrid>
-    <UniformGrid Columns="3" Margin="0,2,0,4">
-      <TextBox Name="TbFov" Text="90" Height="30" Margin="2,0" FontSize="13"
-               VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="2,0" Background="#CBA6F7" Foreground="#1E1E2E"/>
-      <Button Name="BtnKeySpeed" Content="Speed -> key" Height="30" Margin="2,0" Background="#CBA6F7" Foreground="#1E1E2E"/>
-    </UniformGrid>
-    <UniformGrid Columns="2" Margin="0,2,0,4">
-      <TextBox Name="TbSpeed" Text="500" Height="30" Margin="2,0" FontSize="13"
-               VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="2,0" Background="#F5C97B" Foreground="#1E1E2E"/>
-    </UniformGrid>
-    <Button Name="BtnSpeedAll" Content="Speed -> ALL keyframes (value from box above)" Height="30" Margin="0,2,0,4"
-            Background="#FAE3B0" Foreground="#1E1E2E" FontWeight="Bold"/>
-    <Grid Margin="2,4,0,0">
+    <!-- header: title + hotkey pills + close -->
+    <Grid Name="HdrGrid" Grid.Row="0" Background="Transparent" Margin="0,0,0,6">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
-      <TextBlock Name="TbStatus" Text="ready" Foreground="#94E2D5" FontSize="11" TextWrapping="Wrap"/>
-      <CheckBox Name="CbTransparent" Grid.Column="1" Content="Transparent" Foreground="#A6ADC8"
-                FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0"/>
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <TextBlock Text="✨" FontSize="16" VerticalAlignment="Center" Margin="2,0,6,0"/>
+        <TextBlock Text="HP2 Machinima Panel" Foreground="#CDD6F4" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+      </StackPanel>
+      <UniformGrid Grid.Column="1" Columns="4" VerticalAlignment="Center" Margin="0,0,10,0">
+        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="#A6ADC8" Text="кадр"/></TextBlock>
+        </Border>
+        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="#A6ADC8" Text="play"/></TextBlock>
+        </Border>
+        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Foreground="#A6ADC8" Text="stop"/></TextBlock>
+        </Border>
+        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="#A6ADC8" Text="clear"/></TextBlock>
+        </Border>
+      </UniformGrid>
+      <Button Name="BtnClose" Grid.Column="2" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
+              Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
-  </StackPanel>
+
+    <!-- game view helpers -->
+    <UniformGrid Grid.Row="1" Columns="3" Margin="0,0,0,6">
+      <Button Name="BtnHideHud" Content="👁  HideHud" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnCam9" Content="🎥  CamMode 9" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnEscMenu" Content="⏏  Esc (close menu)" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+    </UniformGrid>
+
+    <!-- main action -->
+    <Button Name="BtnPathAdd" Grid.Row="2" Content="📷  ADD KEYFRAME (PathAdd)" Height="52" Margin="3,0,3,6"
+            Background="#3FA85C" Foreground="White" FontSize="17" FontWeight="Bold"/>
+
+    <!-- play by time -->
+    <Grid Grid.Row="3" Margin="3,0,3,6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="9*"/>
+        <ColumnDefinition Width="11*"/>
+      </Grid.ColumnDefinitions>
+      <StackPanel Grid.Column="0" Margin="0,0,6,0">
+        <TextBlock Text="🕐 FLIGHT TIME, SEC (whole path in N seconds)" Foreground="#A6ADC8" FontSize="11" Margin="2,0,0,4"/>
+        <TextBox Name="TbSeconds" Text="15" Height="46" FontSize="18" FontWeight="Bold"
+                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
+      </StackPanel>
+      <Button Name="BtnPathPlay" Grid.Column="1" Content="▶  PLAY (by TIME)" Height="70" Background="#6C71C4"
+              Foreground="White" FontSize="16" FontWeight="Bold"/>
+    </Grid>
+
+    <!-- play by speeds -->
+    <Button Name="BtnPathPlaySpeed" Grid.Row="4" Content="▶  PLAY (by keyframe SPEEDS)" Height="46" Margin="3,0,3,6"
+            Background="#CBA6F7" Foreground="#1E1E2E" FontSize="16" FontWeight="Bold"/>
+
+    <!-- stop / list / clear -->
+    <UniformGrid Grid.Row="5" Columns="3" Margin="3,0,3,8">
+      <Button Name="BtnPathStop" Content="■  Stop" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnPathList" Content="≡  List" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnPathClear" Content="🗑  Clear" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
+    </UniformGrid>
+
+    <!-- keyframes table -->
+    <TextBlock Grid.Row="6" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="#A6ADC8" FontSize="11" Margin="5,0,0,3"/>
+    <DataGrid Name="DgKeys" Grid.Row="7" Height="170" Margin="3,0,3,6" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A"
+              FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
+              CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
+              HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="#181825"
+              AlternatingRowBackground="#313244" RowHeight="26">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="#" Width="30" Binding="{Binding Num}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Time" Width="66" Binding="{Binding Time}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="X" Width="64" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Y" Width="64" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Z" Width="64" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Yaw" Width="62" Binding="{Binding Yaw}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Pitch" Width="56" Binding="{Binding Pitch}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="FOV" Width="48" Binding="{Binding FOV}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
+      </DataGrid.Columns>
+    </DataGrid>
+
+    <!-- table actions -->
+    <UniformGrid Grid.Row="8" Columns="3" Margin="3,0,3,6">
+      <Button Name="BtnRefresh" Content="⟳  Refresh table" Height="34" Margin="3" Background="#313244" Foreground="#89DCEB"/>
+      <Button Name="BtnGoto" Content="✛  Go to selected" Height="34" Margin="3" Background="#313244" Foreground="#89DCEB"/>
+      <Button Name="BtnDel" Content="🗑  Delete selected" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
+    </UniformGrid>
+
+    <!-- parameters row -->
+    <UniformGrid Grid.Row="9" Columns="4" Margin="3,0,3,6">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <TextBlock Text="📷 FOV" Foreground="#CDD6F4" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBox Name="TbFov" Text="90" Width="52" Height="30" FontSize="13"
+                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
+        <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+        <TextBlock Text="✈ Fly speed" Foreground="#CDD6F4" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBox Name="TbSpeed" Text="500" Width="52" Height="30" FontSize="13"
+                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
+        <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
+      </StackPanel>
+      <Button Name="BtnKeySpeed" Content="⚡ Speed → key" Height="34" Margin="3" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Name="BtnSpeedAll" Content="🗂 Speed → ALL keyframes" Height="34" Margin="3" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
+    </UniformGrid>
+
+    <!-- status + transparency -->
+    <Grid Grid.Row="10" Margin="3,2,3,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <Ellipse Width="10" Height="10" Fill="#A6E3A1" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <TextBlock Name="TbStatus" Grid.Column="1" Text="ready" Foreground="#94E2D5" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+      <CheckBox Name="CbTransparent" Grid.Column="2" Content="Transparent (80%)" Foreground="#A6ADC8"
+                FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
+    </Grid>
+  </Grid>
 </Window>
 "@
 
