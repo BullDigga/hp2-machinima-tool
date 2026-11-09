@@ -175,7 +175,45 @@ public class MemScanPanel {
             }
         }
         CloseHandle(h);
-        return "|REGS:" + (hitRegs.Count / 2) + "\n" + sb.ToString();
+        var hdr2 = new System.Text.StringBuilder("|REGS:" + (hitRegs.Count / 2));
+        for ( int r = 0; r < hitRegs.Count; r++ ) { hdr2.Append("|" + hitRegs[r]); }
+        return hdr2.ToString() + "\n" + sb.ToString();
+    }
+
+    // быстрый путь: извлечь PATHEV только из кэшированных областей (addr,size,...)
+    public static string ExtractRegions(int pid, long[] pairs) {
+        if ( pairs.Length < 2 ) return "";
+        IntPtr h = OpenProcess(0x0410, false, pid);
+        if ( h == IntPtr.Zero ) return "";
+        var sb = new System.Text.StringBuilder();
+        int chunk = 0x400000;
+        int overlap = 4096;
+        byte[] buf = new byte[chunk + overlap];
+        for ( int r = 0; r + 1 < pairs.Length; r += 2 ) {
+            long regA = pairs[r];
+            long regS = pairs[r + 1];
+            var seen = new System.Collections.Generic.HashSet<long>();
+            long pos = 0;
+            while ( pos < regS ) {
+                int toRead = (int)Math.Min(regS - pos + overlap, buf.Length);
+                if ( toRead > regS - pos && regS - pos < buf.Length ) toRead = (int)(regS - pos);
+                IntPtr rd;
+                if ( ReadProcessMemory(h, (IntPtr)(regA + pos), buf, (IntPtr)toRead, out rd) ) {
+                    int n = rd.ToInt32();
+                    string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
+                    for ( int i = s.IndexOf("PATHEV:"); i >= 0; i = s.IndexOf("PATHEV:", i + 7) ) {
+                        long abs = (pos >> 1) + i;
+                        if ( !seen.Add(abs) ) continue;
+                        int en = i;
+                        while ( en < s.Length && s[en] >= 32 ) en++;
+                        sb.Append(s.Substring(i, en - i) + "\n");
+                    }
+                }
+                pos += chunk;
+            }
+        }
+        CloseHandle(h);
+        return sb.ToString();
     }
 }
 "@
@@ -270,6 +308,7 @@ $script:KeyRows = New-Object System.Collections.ArrayList
 $script:SeenSeqs = @{}      # seq кадра -> seen
 $script:KeyTimes = @{}      # seq кадра -> "HH:mm:ss" времени постановки
 $script:StampNextSync = $false
+$script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
 
 function Read-SavedPathData {
     foreach ( $f in $script:IniPaths ) {
@@ -301,8 +340,8 @@ function Refresh-Table {
     }
 }
 
-function Sync-FromLog {
-    # v4.4: источник истины = события PATH* (PATHADD/PATHDEL/PATHCLEAR/PATHSPEED).
+function Sync-FromLog([switch]$Force) {
+    # v4.9: быстрый путь через кэш областей; $Force = полный скан (Refresh, старт панели)
     # Сначала лог-файл (если движок его пишет), иначе - скан памяти Game.exe
     # (буфер скрытого лог-окна содержит "ScriptLog: PATHADD:x,y,z,yaw,pitch,fov,spd").
     $rows = New-Object System.Collections.ArrayList
@@ -315,7 +354,58 @@ function Sync-FromLog {
     if ( $txt -eq "" ) {
         $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
         if ( $gp -ne $null ) {
-            try { $txt = [MemScanPanel]::GetLogEvents($gp.Id); $src = "memory" } catch { $txt = "" }
+            # быстрый путь: кэшированные области лог-буфера (~0.2 сек вместо 1-3 сек)
+            if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) {
+                $fast = ""
+                try { $fast = [MemScanPanel]::ExtractRegions($gp.Id, [long[]]$script:ScanCache.Regions) } catch { $fast = "" }
+                if ( $fast -ne "" -and $fast.Contains("PATHEV:") ) {
+                    $newMax = 0
+                    foreach ( $mm in [regex]::Matches($fast, 'PATHEV:(\d+)\|') ) {
+                        $v = [long]$mm.Groups[1].Value
+                        if ( $v -gt $newMax ) { $newMax = $v }
+                    }
+                    if ( $newMax -gt $script:ScanCache.LastSeq ) {
+                        $txt = $fast
+                        $src = "memory"
+                        $script:ScanCache.LastSeq = $newMax
+                    }
+                }
+            }
+            # медленный путь: полный поиск по всей памяти (буфер переехал / первый запуск)
+            if ( $txt -eq "" ) {
+                try { $txt = [MemScanPanel]::GetLogEvents($gp.Id); $src = "memory" } catch { $txt = "" }
+                if ( $txt -ne "" ) {
+                    # первая строка = |REGS:n|addr|size|... - сохраняем области в кэш
+                    $nl = $txt.IndexOf("`n")
+                    if ( $nl -gt 0 ) {
+                        $hdr = $txt.Substring(0, $nl)
+                        $txt = $txt.Substring($nl + 1)
+                        if ( $hdr.StartsWith("|REGS:") ) {
+                            $parts = $hdr.TrimStart('|').Split('|')
+                            if ( $parts.Length -ge 3 ) {
+                                $regs = @()
+                                foreach ( $pv in ($parts | Select-Object -Skip 1) ) { $regs += [long]$pv }
+                                $script:ScanCache.Regions = $regs
+                            }
+                        }
+                    }
+                    if ( $txt -notmatch 'PATHEV:' ) { $txt = ""; $src = "" }
+                }
+            }
+            if ( $src -eq "memory" ) {
+                $mx = 0
+                foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
+                    $v = [long]$mm.Groups[1].Value
+                    if ( $v -gt $mx ) { $mx = $v }
+                }
+                # смена процесса игры = новая сессия: seq начинаются заново
+                if ( $script:ScanCache.Pid -ne $gp.Id ) {
+                    $script:ScanCache.Pid = $gp.Id
+                    $script:ScanCache.LastSeq = $mx
+                } elseif ( $mx -gt $script:ScanCache.LastSeq ) {
+                    $script:ScanCache.LastSeq = $mx
+                }
+            }
         }
     }
 
@@ -393,11 +483,12 @@ function Find-LogFile {
 }
 
 function Sync-AfterCommand([string]$status) {
-    # дать игре дописать лог после команды
-    Start-Sleep -Milliseconds 700
+    # событие пишется в лог сразу после Enter - короткая пауза на всякий случай
+    Start-Sleep -Milliseconds 120
     Sync-FromLog
     if ( $status -ne "" ) { Set-Status $status }
 }
+
 
 function Send-PathSaveAndSync([string]$prefix) {
     Sync-AfterCommand $prefix
@@ -546,7 +637,7 @@ $controls['BtnPathClear'].Add_Click({
     $st = Send-GameCommand "PathClear"
     Sync-AfterCommand $st
 })
-$controls['BtnRefresh'].Add_Click({ Sync-FromLog })
+$controls['BtnRefresh'].Add_Click({ Sync-FromLog -Force })
 $controls['BtnGoto'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
@@ -651,7 +742,7 @@ $window.Add_Loaded({
         return [IntPtr]::Zero
     })
     Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
-    Sync-FromLog
+    Sync-FromLog -Force
 })
 
 $window.Add_Closing({
