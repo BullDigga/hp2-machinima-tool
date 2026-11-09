@@ -643,7 +643,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border CornerRadius="8" Background="{TemplateBinding Background}"
+            <Border x:Name="TplBorder" CornerRadius="8" Background="{TemplateBinding Background}"
                     BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
               <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                 VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
@@ -656,7 +656,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <Setter Property="Opacity" Value="0.65"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
-                <Setter Property="Opacity" Value="0.4"/>
+                <Setter TargetName="TplBorder" Property="Opacity" Value="0.4"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -752,37 +752,43 @@ function Send-PathSaveAndSync([string]$prefix) {
         </Grid>
         <Button.ContextMenu>
           <ContextMenu>
-            <MenuItem Header="English" Tag="en">
-              <MenuItem.Icon>
-                <Viewbox Width="19" Height="13">
-                  <Border CornerRadius="2" Width="22" Height="15" ClipToBounds="True">
-                    <Canvas Width="22" Height="15">
-                      <Rectangle Width="22" Height="15" Fill="#012169"/>
-                      <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="White" StrokeThickness="3.6"/>
-                      <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="White" StrokeThickness="3.6"/>
-                      <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
-                      <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
-                      <Rectangle Width="22" Height="5.4" Canvas.Top="4.8" Fill="White"/>
-                      <Rectangle Width="5.4" Height="15" Canvas.Left="8.3" Fill="White"/>
-                      <Rectangle Width="22" Height="3.2" Canvas.Top="5.9" Fill="#C8102E"/>
-                      <Rectangle Width="3.2" Height="15" Canvas.Left="9.4" Fill="#C8102E"/>
-                    </Canvas>
-                  </Border>
-                </Viewbox>
-              </MenuItem.Icon>
+            <MenuItem Tag="en">
+              <MenuItem.Header>
+                <StackPanel Orientation="Horizontal">
+                  <Viewbox Width="19" Height="13" VerticalAlignment="Center" Margin="0,0,9,0">
+                    <Border CornerRadius="2" Width="22" Height="15" ClipToBounds="True">
+                      <Canvas Width="22" Height="15">
+                        <Rectangle Width="22" Height="15" Fill="#012169"/>
+                        <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+                        <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+                        <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+                        <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+                        <Rectangle Width="22" Height="5.4" Canvas.Top="4.8" Fill="White"/>
+                        <Rectangle Width="5.4" Height="15" Canvas.Left="8.3" Fill="White"/>
+                        <Rectangle Width="22" Height="3.2" Canvas.Top="5.9" Fill="#C8102E"/>
+                        <Rectangle Width="3.2" Height="15" Canvas.Left="9.4" Fill="#C8102E"/>
+                      </Canvas>
+                    </Border>
+                  </Viewbox>
+                  <TextBlock Text="English" VerticalAlignment="Center"/>
+                </StackPanel>
+              </MenuItem.Header>
             </MenuItem>
-            <MenuItem Header="Русский" Tag="ru">
-              <MenuItem.Icon>
-                <Viewbox Width="19" Height="13">
-                  <Border CornerRadius="2" Width="22" Height="15" ClipToBounds="True">
-                    <Canvas Width="22" Height="15">
-                      <Rectangle Width="22" Height="5" Fill="White" Stroke="#B0B7C3" StrokeThickness="0.6"/>
-                      <Rectangle Canvas.Top="5" Width="22" Height="5" Fill="#0039A6"/>
-                      <Rectangle Canvas.Top="10" Width="22" Height="5" Fill="#D52B1E"/>
-                    </Canvas>
-                  </Border>
-                </Viewbox>
-              </MenuItem.Icon>
+            <MenuItem Tag="ru">
+              <MenuItem.Header>
+                <StackPanel Orientation="Horizontal">
+                  <Viewbox Width="19" Height="13" VerticalAlignment="Center" Margin="0,0,9,0">
+                    <Border CornerRadius="2" Width="22" Height="15" ClipToBounds="True">
+                      <Canvas Width="22" Height="15">
+                        <Rectangle Width="22" Height="5" Fill="White" Stroke="#B0B7C3" StrokeThickness="0.6"/>
+                        <Rectangle Canvas.Top="5" Width="22" Height="5" Fill="#0039A6"/>
+                        <Rectangle Canvas.Top="10" Width="22" Height="5" Fill="#D52B1E"/>
+                      </Canvas>
+                    </Border>
+                  </Viewbox>
+                  <TextBlock Text="Русский" VerticalAlignment="Center"/>
+                </StackPanel>
+              </MenuItem.Header>
             </MenuItem>
           </ContextMenu>
         </Button.ContextMenu>
@@ -882,7 +888,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Name="BtnRefresh" Width="34" Height="34" FontSize="17" FontWeight="Bold"
               HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,16,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
-              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)">
+              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)" ToolTipService.ShowOnDisabled="True">
         <TextBlock Text="⟳" RenderTransformOrigin="0.5,0.5">
           <TextBlock.RenderTransform>
             <RotateTransform x:Name="RefreshRot" Angle="0"/>
@@ -892,7 +898,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
               Background="#EB6F8E" Foreground="White"
-              BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)" ToolTipService.ShowOnDisabled="True"/>
+              BorderThickness="0" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)" ToolTipService.ShowOnDisabled="True"/>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
         <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
