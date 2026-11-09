@@ -388,7 +388,17 @@ function Sync-FromLog([switch]$Force) {
         } catch { }
     }
     $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ( $gp -eq $null ) { Stop-Spin; Set-Status "no keyframe source - is the game running?"; return }
+    if ( $gp -eq $null ) {
+        # v5.15: игра закрыта - сброс карты/плей-состояния и лочка кнопок
+        if ( $script:CurrentMap -ne "" -or $script:Playing ) {
+            $script:CurrentMap = ""
+            if ( $script:Playing ) { Set-Playing $false }
+            Update-SelectionButtons
+        }
+        Stop-Spin
+        Set-Status "no keyframe source - is the game running?"
+        return
+    }
     $pairs = $null
     if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) { $pairs = [long[]]$script:ScanCache.Regions }
     $script:LastScanFast = ($pairs -ne $null)
@@ -411,7 +421,15 @@ function Complete-SyncFromLog {
     }
     $src = ""
     $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ( $gp -eq $null ) { Set-Status "no keyframe source - is the game running?"; return }
+    if ( $gp -eq $null ) {
+        if ( $script:CurrentMap -ne "" -or $script:Playing ) {
+            $script:CurrentMap = ""
+            if ( $script:Playing ) { Set-Playing $false }
+            Update-SelectionButtons
+        }
+        Set-Status "no keyframe source - is the game running?"
+        return
+    }
     # v5.10: быстрый скан вернулся пустым = кэш областей устарел (буфер лога переехал).
     # Инвалидировать кэш и выйти, НЕ трогая таблицу (иначе она опустошается).
     if ( $txt -eq "" -and $script:LastScanFast ) {
@@ -1432,10 +1450,34 @@ $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 # ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
 $script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
+# v5.15: блокируется, пока игра не загружена на какой-либо карте
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnInsert','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','BtnRefresh','TbFov','TbSpeed')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnInsert','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 function Update-SelectionButtons {
+    # v5.15: игра не на карте (закрыта или меню) - доступна только Прозрачность и поле
+    # секунд; таблица с кадрами остаётся живой ради оффлайн-удаления
+    $gameOn = ($script:CurrentMap -ne "")
+    if ( -not $gameOn ) {
+        $rowsLeft = ($script:KeyRows -ne $null -and $script:KeyRows.Count -gt 0)
+        foreach ( $b in $script:NoGameDep ) {
+            try { $controls[$b].IsEnabled = $false } catch { }
+        }
+        try {
+            $controls['DgKeys'].IsEnabled = $rowsLeft
+            $controls['BtnPathClear'].IsEnabled = $rowsLeft
+        } catch { }
+        $controls['BtnPathStop'].IsEnabled = $false
+        $L = $null
+        if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
+        if ( $L -ne $null ) {
+            foreach ( $b in $script:NoGameDep ) {
+                try { $controls[$b].ToolTip = $L.TipNoGame } catch { }
+            }
+        }
+        return
+    }
     $play = [bool]$script:Playing
     foreach ( $b in $script:PlayLock ) {
         try { $controls[$b].IsEnabled = (-not $play) } catch { }
@@ -1513,6 +1555,7 @@ function Stop-Spin {
 }
 $script:SpinManual = $false
 $script:SpinAngle = 0
+$script:GamePoll = 0
 $script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
 $script:UiTimer.Add_Tick({
@@ -1522,6 +1565,16 @@ $script:UiTimer.Add_Tick({
         $script:SpinTransform.Angle = $script:SpinAngle
     }
     if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
+    # v5.15: периодическая проверка "игра ещё на карте?" - ловит выход из игры без кликов
+    $script:GamePoll = ($script:GamePoll + 1) % 20
+    if ( $script:GamePoll -eq 0 -and $script:CurrentMap -ne "" ) {
+        if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+            $script:CurrentMap = ""
+            if ( $script:Playing ) { Set-Playing $false }
+            Update-SelectionButtons
+            Set-Status "game closed"
+        }
+    }
 })
 $script:UiTimer.Start()
 
@@ -1547,6 +1600,7 @@ $script:LocData = @{
         TipStop = "Nothing is playing right now"
         OneKey = "only 1 key - jumped to it"
         TipWrongMap = "Keyframes belong to a different map - load it or clear the table"
+        TipNoGame = "The game is not running on a level - launch the game and load a map"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -1570,6 +1624,7 @@ $script:LocData = @{
         TipStop = "Сейчас ничего не воспроизводится"
         OneKey = "всего один кадр - перешли к нему"
         TipWrongMap = "Кадры с другой карты - загрузите её или очистите таблицу"
+        TipNoGame = "Игра не запущена на уровне - запусти игру и выбери карту"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
