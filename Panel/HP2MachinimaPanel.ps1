@@ -752,6 +752,25 @@ function Send-PathSaveAndSync([string]$prefix) {
         </Grid>
         <Button.ContextMenu>
           <ContextMenu>
+            <ContextMenu.Resources>
+              <!-- v5.12.2: без серой колонки иконок - пункты перешаблонены, флаг уже в Header -->
+              <Style TargetType="MenuItem">
+                <Setter Property="Template">
+                  <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                      <Border x:Name="ItmB" Background="Transparent" Padding="12,6">
+                        <ContentPresenter ContentSource="Header" VerticalAlignment="Center"/>
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                          <Setter TargetName="ItmB" Property="Background" Value="#FFE4EEFC"/>
+                        </Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </Setter.Value>
+                </Setter>
+              </Style>
+            </ContextMenu.Resources>
             <MenuItem Tag="en">
               <MenuItem.Header>
                 <StackPanel Orientation="Horizontal">
