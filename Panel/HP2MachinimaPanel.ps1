@@ -327,6 +327,7 @@ $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
 $script:CurrentMap = ""   # карта, где игра СЕЙЧАС (из MAP-событий)
 $script:KeyMap = ""       # v5.14: карта, которой принадлежат кадры в таблице
+$script:LastGen = -1      # v5.16: поколение лога (меняется на каждой загрузке уровня)
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
 $script:KeyTimesFile = Join-Path $PSScriptRoot "key-times.txt"
 if ( Test-Path $script:KeyTimesFile ) {
@@ -473,31 +474,49 @@ function Complete-SyncFromLog {
         }
     }
     if ( $txt -ne "" ) {
-        $mx = 0
-        foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
-            $v = [long]$mm.Groups[1].Value
-            if ( $v -gt $mx ) { $mx = $v }
+        # v4.5: только PATHEV:<seq>|TYPE|data - события с монотонным номером.
+        # Старые PATHADD-строки игнорируются: в памяти живут КОПИИ буфера лога,
+        # проигрывание сырых событий даёт мусор (очистка отменяется старыми кадрами).
+        $rxEv = [regex]'PATHEV:(\d+):(\d+)\|([A-Z]+)\|?([^\x00-\x1F]*)'
+        $ev = @()
+        foreach ( $m in $rxEv.Matches($txt) ) {
+            $ev += New-Object PSObject -Property @{Gen=[long]$m.Groups[1].Value; Seq=[long]$m.Groups[2].Value; T=$m.Groups[3].Value; D=$m.Groups[4].Value}
         }
-        # смена процесса игры = новая сессия: seq начинаются заново
+        # v5.16: ПОКОЛЕНИЯ. Уровень сменился - движок сбрасывает seq в 1 и инкрементирует
+        # поколение (в самом событии). Играем только события текущего поколения:
+        # старый уровень больше никогда не вмешается, копии буфера отфильтруются по Gen.
+        $maxGen = 0
+        foreach ( $e0 in $ev ) { if ( $e0.Gen -gt $maxGen ) { $maxGen = $e0.Gen } }
+        $ev = @($ev | Where-Object { $_.Gen -eq $maxGen })
+        $genSwitch = ($maxGen -ne $script:LastGen)
+        if ( $genSwitch ) {
+            $script:LastGen = $maxGen
+            $script:KeyMap = ""
+            $gp2 = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ( $gp2 -ne $null ) {
+                $pfx2 = [string]$gp2.Id + ":"
+                foreach ( $k in (@($script:SeenSeqs.Keys) ) ) {
+                    if ( $k.StartsWith($pfx2) ) { $script:SeenSeqs.Remove($k) }
+                }
+                foreach ( $k in (@($script:KeyTimes.Keys) ) ) {
+                    if ( $k.StartsWith($pfx2) ) { $script:KeyTimes.Remove($k) }
+                }
+            }
+        }
+        $ev = @($ev | Sort-Object -Property Seq -Unique)
+        # LastSeq: смена уровня = новый отсчёт seq; смена процесса = новая сессия
+        $mx = 0
+        foreach ( $e2 in $ev ) { if ( $e2.Seq -gt $mx ) { $mx = $e2.Seq } }
         if ( $script:ScanCache.Pid -ne $gp.Id ) {
             $script:ScanCache.Pid = $gp.Id
+            $script:ScanCache.LastSeq = $mx
+        } elseif ( $genSwitch ) {
             $script:ScanCache.LastSeq = $mx
         } elseif ( $mx -gt $script:ScanCache.LastSeq ) {
             $script:ScanCache.LastSeq = $mx
         }
-    }
-
-    if ( $txt -ne "" ) {
-        # v4.5: только PATHEV:<seq>|TYPE|data - события с монотонным номером.
-        # Старые PATHADD-строки игнорируются: в памяти живут КОПИИ буфера лога,
-        # проигрывание сырых событий даёт мусор (очистка отменяется старыми кадрами).
-        $rxEv = [regex]'PATHEV:(\d+)\|([A-Z]+)\|?([^\x00-\x1F]*)'
-        $ev = @()
-        foreach ( $m in $rxEv.Matches($txt) ) {
-            $ev += New-Object PSObject -Property @{Seq=[long]$m.Groups[1].Value; T=$m.Groups[2].Value; D=$m.Groups[3].Value}
-        }
         $isNum = '^-?\d+(\.\d+)?$'
-        foreach ( $e in ($ev | Sort-Object -Property Seq -Unique) ) {
+        foreach ( $e in $ev ) {
             switch ( $e.T ) {
                 'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = "" }
                 'DEL'   {
@@ -1429,8 +1448,8 @@ $window.Add_Closing({
 
 # ---------- theme toggle (dark default) ----------
 $script:DarkTheme = $true
-$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB"; HdrBrush = "#FF313244" }
-$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285"; HdrBrush = "#FFE4EAF3" }
+$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB"; HdrBrush = "#FF313244"; SelBrush = "#FF3D4A66" }
+$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285"; HdrBrush = "#FFE4EAF3"; SelBrush = "#FFD8E6F8" }
 function Set-Theme([bool]$dark) {
     $script:DarkTheme = $dark   # фикс: без этого оба клика вычисляли одну и ту же цель
     $map = $script:DarkBrushes
