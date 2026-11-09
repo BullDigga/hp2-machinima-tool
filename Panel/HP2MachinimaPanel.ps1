@@ -522,17 +522,27 @@ function Send-PathSaveAndSync([string]$prefix) {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="HP2 Machinima Panel" Width="720" SizeToContent="Height"
-        Topmost="True" Background="#F21E1E2E" WindowStyle="None" AllowsTransparency="True"
+        Topmost="True" Background="{DynamicResource BgBrush}" WindowStyle="None" AllowsTransparency="True"
         ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60"
         FontFamily="Segoe UI">
   <Window.Resources>
+    <SolidColorBrush x:Key="BgBrush" Color="#F21E1E2E"/>
+    <SolidColorBrush x:Key="PanelBrush" Color="#313244"/>
+    <SolidColorBrush x:Key="TableBgBrush" Color="#181825"/>
+    <SolidColorBrush x:Key="AltRowBrush" Color="#313244"/>
+    <SolidColorBrush x:Key="TextBrush" Color="#CDD6F4"/>
+    <SolidColorBrush x:Key="MutedBrush" Color="#A6ADC8"/>
+    <SolidColorBrush x:Key="LineBrush" Color="#585B70"/>
+    <SolidColorBrush x:Key="StatusBrush" Color="#94E2D5"/>
+    <SolidColorBrush x:Key="DotBrush" Color="#A6E3A1"/>
+
     <Style TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border CornerRadius="8" Background="{TemplateBinding Background}"
-                    BorderBrush="#585B70" BorderThickness="0,0,0,1">
+                    BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,4"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -552,7 +562,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <Setter.Value>
           <ControlTemplate TargetType="TextBox">
             <Border CornerRadius="6" Background="{TemplateBinding Background}"
-                    BorderBrush="#585B70" BorderThickness="1">
+                    BorderBrush="{DynamicResource LineBrush}" BorderThickness="1">
               <ScrollViewer x:Name="PART_ContentHost" Margin="4,2" VerticalAlignment="Center"/>
             </Border>
           </ControlTemplate>
@@ -591,32 +601,33 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <TextBlock Text="✨" FontSize="16" VerticalAlignment="Center" Margin="2,0,6,0"/>
-        <TextBlock Text="HP2 Machinima Panel" Foreground="#CDD6F4" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+        <Image Name="ImgOwl" Width="26" Height="26" Margin="2,0,8,0"/>
+        <TextBlock Text="HP2 Machinima Panel" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
       </StackPanel>
       <UniformGrid Grid.Column="1" Columns="4" VerticalAlignment="Center" Margin="0,0,10,0">
-        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="#A6ADC8" Text="  кадр"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  кадр"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="#A6ADC8" Text="  play"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Foreground="#A6ADC8" Text="  stop"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  stop"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="#A6ADC8" Text="  clear"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
-      <Button Name="BtnClose" Grid.Column="2" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
+      <Button Name="BtnTheme" Grid.Column="2" Content="🌙" Width="34" Height="30" FontSize="14" BorderThickness="0"/>
+      <Button Name="BtnClose" Grid.Column="3" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
     <!-- game view helpers -->
     <UniformGrid Grid.Row="1" Columns="3" Margin="0,0,0,6">
-      <Button Name="BtnHideHud" Content="👁  HideHud" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnCam9" Content="🎥  CamMode 9" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnEscMenu" Content="⏏  Esc (close menu)" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnHideHud" Content="👁  HideHud" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Name="BtnCam9" Content="🎥  CamMode 9" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Name="BtnEscMenu" Content="⏏  Esc (close menu)" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
     </UniformGrid>
 
     <!-- main action -->
@@ -630,9 +641,9 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="11*"/>
       </Grid.ColumnDefinitions>
       <StackPanel Grid.Column="0" Margin="0,0,6,0">
-        <TextBlock Text="🕐 FLIGHT TIME, SEC (whole path in N seconds)" Foreground="#A6ADC8" FontSize="11" Margin="2,0,0,4"/>
+        <TextBlock Text="🕐 FLIGHT TIME, SEC (whole path in N seconds)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="2,0,0,4"/>
         <TextBox Name="TbSeconds" Text="15" Height="46" FontSize="18" FontWeight="Bold"
-                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
+                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       </StackPanel>
       <Button Name="BtnPathPlay" Grid.Column="1" Content="▶  PLAY (by TIME)" Height="70" Background="#6C71C4"
               Foreground="White" FontSize="16" FontWeight="Bold"/>
@@ -644,18 +655,18 @@ function Send-PathSaveAndSync([string]$prefix) {
 
     <!-- stop / list / clear -->
     <UniformGrid Grid.Row="5" Columns="3" Margin="3,0,3,8">
-      <Button Name="BtnPathStop" Content="■  Stop" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnPathList" Content="≡  List" Height="34" Margin="3" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnPathStop" Content="■  Stop" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Name="BtnPathList" Content="≡  List" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnPathClear" Content="🗑  Clear" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
     </UniformGrid>
 
     <!-- keyframes table -->
-    <TextBlock Grid.Row="6" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="#A6ADC8" FontSize="11" Margin="5,0,0,3"/>
-    <DataGrid Name="DgKeys" Grid.Row="7" Height="170" Margin="3,0,3,6" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A"
+    <TextBlock Grid.Row="6" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
+    <DataGrid Name="DgKeys" Grid.Row="7" Height="170" Margin="3,0,3,6" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
-              HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="#181825"
-              AlternatingRowBackground="#313244" RowHeight="26">
+              HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
+              AlternatingRowBackground="{DynamicResource AltRowBrush}" RowHeight="26">
       <DataGrid.Columns>
         <DataGridTextColumn Header="#" Width="30" Binding="{Binding Num}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Time" Width="66" Binding="{Binding Time}" IsReadOnly="True"/>
@@ -671,8 +682,8 @@ function Send-PathSaveAndSync([string]$prefix) {
 
     <!-- table actions -->
     <UniformGrid Grid.Row="8" Columns="3" Margin="3,0,3,6">
-      <Button Name="BtnRefresh" Content="⟳  Refresh table" Height="34" Margin="3" Background="#313244" Foreground="#89DCEB"/>
-      <Button Name="BtnGoto" Content="✛  Go to selected" Height="34" Margin="3" Background="#313244" Foreground="#89DCEB"/>
+      <Button Name="BtnRefresh" Content="⟳  Refresh table" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="#89DCEB"/>
+      <Button Name="BtnGoto" Content="✛  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="#89DCEB"/>
       <Button Name="BtnDel" Content="🗑  Delete selected" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
     </UniformGrid>
 
@@ -685,15 +696,15 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <TextBlock Text="📷 FOV" Foreground="#CDD6F4" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBlock Text="📷 FOV" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
         <TextBox Name="TbFov" Text="90" Width="52" Height="30" FontSize="13"
-                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
+                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
         <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
       </StackPanel>
       <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-        <TextBlock Text="✈ Fly speed" Foreground="#CDD6F4" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBlock Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
         <TextBox Name="TbSpeed" Text="500" Width="52" Height="30" FontSize="13"
-                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
+                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
         <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
       </StackPanel>
       <Button Name="BtnKeySpeed" Grid.Column="2" Content="⚡ Speed → key" Height="34" Margin="6,0,3,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
@@ -707,9 +718,9 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
-      <Ellipse Width="10" Height="10" Fill="#A6E3A1" VerticalAlignment="Center" Margin="0,0,8,0"/>
-      <TextBlock Name="TbStatus" Grid.Column="1" Text="ready" Foreground="#94E2D5" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
-      <CheckBox Name="CbTransparent" Grid.Column="2" Content="Transparent (80%)" Foreground="#A6ADC8"
+      <Ellipse Name="StatusDot" Width="10" Height="10" Fill="{DynamicResource DotBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <TextBlock Name="TbStatus" Grid.Column="1" Text="ready" Foreground="{DynamicResource StatusBrush}" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+      <CheckBox Name="CbTransparent" Grid.Column="2" Content="Transparent" Foreground="{DynamicResource MutedBrush}"
                 FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
     </Grid>
   </Grid>
@@ -720,7 +731,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -879,6 +890,35 @@ $window.Add_Closing({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
     for ( $id = 1; $id -le 4; $id++ ) { [GameCtl]::UnregisterHotKey($helper.Handle, $id) | Out-Null }
 })
+
+# ---------- theme toggle (dark default) ----------
+$script:DarkTheme = $true
+$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1" }
+$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44" }
+function Set-Theme([bool]$dark) {
+    $map = $script:DarkBrushes
+    if ( -not $dark ) { $map = $script:LightBrushes }
+    foreach ( $k in $map.Keys ) {
+        $window.Resources[$k] = [Windows.Media.SolidColorBrush][Windows.Media.ColorConverter]::ConvertFromString($map[$k])
+    }
+    $controls['BtnTheme'].Content = "🌙"
+    if ( -not $dark ) { $controls['BtnTheme'].Content = "☀" }
+}
+$controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
+
+# ---------- owl icon ----------
+$owlPath = Join-Path $PSScriptRoot "owl.png"
+if ( Test-Path $owlPath ) {
+    try {
+        $bmp = New-Object Windows.Media.Imaging.BitmapImage
+        $bmp.BeginInit()
+        $bmp.UriSource = (New-Object Uri($owlPath))
+        $bmp.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $bmp.EndInit()
+        $bmp.Freeze()
+        $controls['ImgOwl'].Source = $bmp
+    } catch { }
+}
 
 $window.ShowDialog() | Out-Null
 
