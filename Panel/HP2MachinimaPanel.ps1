@@ -135,31 +135,51 @@ function Send-GameCommand([string]$cmd) {
     return "$cmd  OK  " + (Get-Date -Format HH:mm:ss)
 }
 
-# ---------- ini / keyframe table ----------
+# ---------- keyframe table: LOCAL tracking (panel counts keys itself) ----------
+# Игра не отдаёт данные наружу (SaveConfig/set ini: не пишут в M212) -
+# панель считает кадры сама: F8=+1, Del=-1, Clear=0. Координаты не нужны:
+# двойной клик = PathGoto (камера прыгает к кадру - видно глазами).
 
-function Find-PathIni {
-    $candidates = @(
-        "F:\Harry Potter and the Chamber of Secrets\system\Default.ini",
-        "F:\Harry Potter and the Chamber of Secrets\system\User.ini",
-        "C:\Users\$env:USERNAME\Documents\Harry - Coding Evolved\Default.ini",
-        "C:\Users\$env:USERNAME\Documents\Harry - Coding Evolved\User.ini",
-        "C:\Users\$env:USERNAME\AppData\Local\VirtualStore\F:\Harry Potter and the Chamber of Secrets\system\Default.ini"
-    )
-    foreach ($p in $candidates) {
-        if ( (Test-Path $p) -and ((Get-Content $p -Raw -ErrorAction SilentlyContinue) -match 'SavedPathData') ) {
-            return $p
+$script:KeyFovs = New-Object System.Collections.ArrayList   # FOV на момент добавления
+
+function Refresh-Table {
+    $rows = @()
+    for ( $i = 0; $i -lt $script:KeyFovs.Count; $i++ ) {
+        $rows += [PSCustomObject]@{
+            Num = $i
+            X   = "-"
+            Y   = "-"
+            Z   = "-"
+            Yaw = "-"
+            Pitch = "-"
+            FOV = $script:KeyFovs[$i]
         }
     }
-    return $null
+    $controls['LvKeys'].ItemsSource = $rows
+    if ( $rows.Count -eq 0 ) {
+        Set-Status "table: 0 keyframes - press F8 in game to add"
+    } else {
+        Set-Status "table: $($rows.Count) keyframes"
+    }
 }
 
-function Get-SavedPathData {
-    $ini = Find-PathIni
-    if ( -not $ini ) { return "" }
-    $t = Get-Content $ini -Raw
-    $m = [regex]::Match($t, 'SavedPathData="?([^"\r\n]+)')
-    if ( $m.Success ) { return $m.Groups[1].Value }
-    return ""
+function Track-AddKey {
+    $fov = $controls['TbFov'].Text.Trim()
+    if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
+    [void]$script:KeyFovs.Add($fov)
+    Refresh-Table
+}
+
+function Track-DelKey([int]$idx) {
+    if ( $idx -ge 0 -and $idx -lt $script:KeyFovs.Count ) {
+        $script:KeyFovs.RemoveAt($idx)
+    }
+    Refresh-Table
+}
+
+function Track-ClearKeys {
+    $script:KeyFovs.Clear()
+    Refresh-Table
 }
 
 # ---------- UI ----------
@@ -173,7 +193,7 @@ function Get-SavedPathData {
   <StackPanel Margin="10">
     <TextBlock Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
                HorizontalAlignment="Center" Margin="0,0,0,2"/>
-    <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 SaveIni" Foreground="#F9E2AF"
+    <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 Clear" Foreground="#F9E2AF"
                FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,8"/>
     <UniformGrid Columns="2" Margin="0,0,0,4">
       <Button Name="BtnHideHud" Content="HideHud" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
@@ -213,11 +233,10 @@ function Get-SavedPathData {
       <Button Name="BtnGoto" Content="Go to selected" Height="30" Margin="2" Background="#89DCEB" Foreground="#1E1E2E"/>
       <Button Name="BtnDel" Content="Delete selected" Height="30" Margin="2" Background="#F38BA8" Foreground="#1E1E2E"/>
     </UniformGrid>
-    <UniformGrid Columns="3" Margin="0,2,0,4">
+    <UniformGrid Columns="2" Margin="0,2,0,4">
       <TextBox Name="TbFov" Text="90" Height="30" Margin="2,0" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="2,0" Background="#CBA6F7" Foreground="#1E1E2E"/>
-      <Button Name="BtnSaveIni" Content="SaveIni" Height="30" Margin="2,0" Background="#94E2D5" Foreground="#1E1E2E"/>
     </UniformGrid>
     <UniformGrid Columns="2" Margin="0,2,0,4">
       <TextBox Name="TbSpeed" Text="250" Height="30" Margin="2,0" FontSize="13"
@@ -233,7 +252,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','LvKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnSaveIni','TbSpeed','BtnSpeed','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','LvKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','TbSpeed','BtnSpeed','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -243,6 +262,7 @@ function Set-Status([string]$s) {
 
 function Do-PathAdd {
     Set-Status (Send-GameCommand "PathAdd")
+    Track-AddKey
 }
 function Do-PathPlay {
     $sec = $controls['TbSeconds'].Text.Trim()
@@ -256,7 +276,10 @@ $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
 $controls['BtnPathPlay'].Add_Click({ Do-PathPlay })
 $controls['BtnPathStop'].Add_Click({ Set-Status (Send-GameCommand "PathStop") })
 $controls['BtnPathList'].Add_Click({ Set-Status (Send-GameCommand "PathList") })
-$controls['BtnPathClear'].Add_Click({ Set-Status (Send-GameCommand "PathClear") })
+$controls['BtnPathClear'].Add_Click({
+    Set-Status (Send-GameCommand "PathClear")
+    Track-ClearKeys
+})
 $controls['BtnRefresh'].Add_Click({ Refresh-Table })
 $controls['BtnGoto'].Add_Click({
     $sel = $controls['LvKeys'].SelectedItem
@@ -267,20 +290,13 @@ $controls['BtnDel'].Add_Click({
     $sel = $controls['LvKeys'].SelectedItem
     if ( $sel -ne $null ) {
         Set-Status (Send-GameCommand "PathDel $($sel.Num)")
-        Start-Sleep -Milliseconds 200
-        Set-Status (Send-GameCommand "PathSave")
-        Refresh-Table
+        Track-DelKey $sel.Num
     } else { Set-Status "select a keyframe row first" }
 })
 $controls['BtnSetFov'].Add_Click({
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
     Set-Status (Send-GameCommand "Cam_FOV $fov")
-})
-$controls['BtnSaveIni'].Add_Click({
-    Set-Status (Send-GameCommand "PathSave")
-    Start-Sleep -Milliseconds 300
-    Refresh-Table
 })
 $controls['BtnSpeed'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
@@ -313,10 +329,10 @@ $window.Add_Loaded({
                 2 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathPlay }) | Out-Null }
                 3 { $window.Dispatcher.BeginInvoke([Action]{ Set-Status (Send-GameCommand "PathStop") }) | Out-Null }
                 4 {
+                    # F11 = PathClear + локальный сброс (сохранение в ini в M212 не работает)
                     $window.Dispatcher.BeginInvoke([Action]{
-                        Set-Status (Send-GameCommand "PathSave")
-                        Start-Sleep -Milliseconds 300
-                        Refresh-Table
+                        Set-Status (Send-GameCommand "PathClear")
+                        Track-ClearKeys
                     }) | Out-Null
                 }
             }
@@ -324,7 +340,8 @@ $window.Add_Loaded({
         }
         return [IntPtr]::Zero
     })
-    Set-Status "hotkeys armed: F8 add / F9 play / F10 stop / F11 save"
+    Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
+    Refresh-Table
 })
 
 $window.Add_Closing({

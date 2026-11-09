@@ -111,9 +111,9 @@ function PathExportIni()
 		}
 	}
 	SavedPathData = s;
-	// пишем через class-defaults: static SaveConfig кладёт [HGame.BaseCam] в Default.ini
+	// default-объект хранит данные, SaveConfig от instance пишет их в Default.ini
 	Class'HGame.BaseCam'.default.SavedPathData = s;
-	Class'HGame.BaseCam'.static.SaveConfig();
+	SaveConfig();
 	PlayerHarry.ClientMessage("Path: exported "$PathKeys.Length$" keys to ini");
 }
 
