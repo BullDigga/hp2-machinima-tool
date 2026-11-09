@@ -161,18 +161,14 @@ public class MemScanPanel {
             if ( ReadProcessMemory(h, (IntPtr)(bestAddr + pos), buf, (IntPtr)toRead, out rd) ) {
                 int n = rd.ToInt32();
                 string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
-                // события в порядке позиций
+                // только события с номером сессии: PATHEV:<seq>|TYPE|data
                 var marks = new System.Collections.Generic.List<long>();
-                var types = new System.Collections.Generic.List<int>();
-                for ( int i = s.IndexOf("PATHCLEAR"); i >= 0; i = s.IndexOf("PATHCLEAR", i + 9) ) { marks.Add(i); types.Add(0); }
-                for ( int i = s.IndexOf("PATHDEL:"); i >= 0; i = s.IndexOf("PATHDEL:", i + 8) ) { marks.Add(i); types.Add(1); }
-                for ( int i = s.IndexOf("PATHADD:"); i >= 0; i = s.IndexOf("PATHADD:", i + 8) ) { marks.Add(i); types.Add(2); }
-                for ( int i = s.IndexOf("PATHSPEED:"); i >= 0; i = s.IndexOf("PATHSPEED:", i + 10) ) { marks.Add(i); types.Add(3); }
+                for ( int i = s.IndexOf("PATHEV:"); i >= 0; i = s.IndexOf("PATHEV:", i + 7) ) { marks.Add(i); }
                 // сортировка вставками по позиции (мало элементов)
                 for ( int a = 1; a < marks.Count; a++ ) {
-                    long km = marks[a]; int kt = types[a]; int b = a - 1;
-                    while ( b >= 0 && marks[b] > km ) { marks[b+1] = marks[b]; types[b+1] = types[b]; b--; }
-                    marks[b+1] = km; types[b+1] = kt;
+                    long km = marks[a]; int b = a - 1;
+                    while ( b >= 0 && marks[b] > km ) { marks[b+1] = marks[b]; b--; }
+                    marks[b+1] = km;
                 }
                 for ( int mi = 0; mi < marks.Count; mi++ ) {
                     long abs = (pos >> 1) + marks[mi];   // абсолютная позиция в char'ах
@@ -181,8 +177,7 @@ public class MemScanPanel {
                     int en = st;
                     while ( en < s.Length && s[en] >= 32 ) en++;
                     string tok = s.Substring(st, en - st);
-                    if ( types[mi] == 0 ) sb.Append("PATHCLEAR\n");
-                    else sb.Append(tok.Replace(':', '|') + "\n");
+                    sb.Append(tok + "\n");
                 }
             }
             pos += chunk;
@@ -305,25 +300,21 @@ function Sync-FromLog {
     }
 
     if ( $txt -ne "" ) {
-        # только текущая сессия лог-файла
-        $idx = $txt.LastIndexOf("Log file open")
-        if ( $idx -gt 0 -and $src -eq "log file" ) { $txt = $txt.Substring($idx) }
-        $rxAdd = [regex]'PATHADD[:\|]([-0-9\.,eE\+]+)'
-        $rxDel = [regex]'PATHDEL[:\|](\d+)'
-        $rxClr = [regex]'PATHCLEAR'
-        $rxSpd = [regex]'PATHSPEED[:\|](\d+),([-0-9\.,eE\+]+)'
+        # v4.5: только PATHEV:<seq>|TYPE|data - события с монотонным номером.
+        # Старые PATHADD-строки игнорируются: в памяти живут КОПИИ буфера лога,
+        # проигрывание сырых событий даёт мусор (очистка отменяется старыми кадрами).
+        $rxEv = [regex]'PATHEV:(\d+)\|([A-Z]+)\|?([^\x00-\x1F]*)'
         $ev = @()
-        foreach ( $m in $rxClr.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=0; A=''; B=''} }
-        foreach ( $m in $rxDel.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=1; A=$m.Groups[1].Value; B=''} }
-        foreach ( $m in $rxAdd.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=2; A=$m.Groups[1].Value; B=''} }
-        foreach ( $m in $rxSpd.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=3; A=$m.Groups[1].Value; B=$m.Groups[2].Value} }
+        foreach ( $m in $rxEv.Matches($txt) ) {
+            $ev += New-Object PSObject -Property @{Seq=[long]$m.Groups[1].Value; T=$m.Groups[2].Value; D=$m.Groups[3].Value}
+        }
         $isNum = '^-?\d+(\.\d+)?$'
-        foreach ( $e in ($ev | Sort-Object Pos) ) {
+        foreach ( $e in ($ev | Sort-Object -Property Seq -Unique) ) {
             switch ( $e.T ) {
-                0 { $rows.Clear() | Out-Null }
-                1 { $i = [int]$e.A; if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) } }
-                2 {
-                    $p = $e.A -split ','
+                'CLEAR' { $rows.Clear() | Out-Null }
+                'DEL'   { $i = [int]$e.D; if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) } }
+                'ADD'   {
+                    $p = $e.D -split ','
                     if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum ) {
                         $r = New-Object KeyRow
                         $r.Num   = $rows.Count
@@ -337,7 +328,11 @@ function Sync-FromLog {
                         [void]$rows.Add($r)
                     }
                 }
-                3 { $i = [int]$e.A; if ( $i -ge 0 -and $i -lt $rows.Count -and $e.B -match $isNum ) { $rows[$i].Speed = [double]$e.B } }
+                'SPEED' {
+                    $pp = $e.D -split ','
+                    $i = [int]$pp[0]
+                    if ( $pp.Count -ge 2 -and $i -ge 0 -and $i -lt $rows.Count -and $pp[1] -match $isNum ) { $rows[$i].Speed = [double]$pp[1] }
+                }
             }
         }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
