@@ -532,12 +532,15 @@ function Send-PathSaveAndSync([string]$prefix) {
     </UniformGrid>
     <Button Name="BtnPathAdd" Content="ADD KEYFRAME (PathAdd)" Height="42" Margin="0,2" Background="#A6E3A1" Foreground="#1E1E2E"
             FontSize="14" FontWeight="Bold"/>
-    <UniformGrid Columns="2" Margin="0,4,0,2">
+    <TextBlock Text="FLIGHT TIME, SEC (whole path in N seconds)" Foreground="#A6ADC8" FontSize="11" Margin="2,4,0,0"/>
+    <UniformGrid Columns="2" Margin="0,2,0,2">
       <TextBox Name="TbSeconds" Text="15" Height="34" Margin="2,0" FontSize="14"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
-      <Button Name="BtnPathPlay" Content="PLAY" Height="34" Margin="2,0" Background="#F9E2AF" Foreground="#1E1E2E"
+      <Button Name="BtnPathPlay" Content="PLAY (by TIME)" Height="34" Margin="2,0" Background="#F9E2AF" Foreground="#1E1E2E"
               FontSize="14" FontWeight="Bold"/>
     </UniformGrid>
+    <Button Name="BtnPathPlaySpeed" Content="PLAY (by keyframe SPEEDS)" Height="34" Margin="0,2,0,0" Background="#F9E2AF"
+            Foreground="#1E1E2E" FontSize="14" FontWeight="Bold"/>
     <UniformGrid Columns="3" Margin="0,4">
       <Button Name="BtnPathStop" Content="Stop" Height="30" Margin="2" Background="#45475A" Foreground="#CDD6F4"/>
       <Button Name="BtnPathList" Content="List" Height="30" Margin="2" Background="#45475A" Foreground="#CDD6F4"/>
@@ -574,7 +577,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Name="BtnKeySpeed" Content="Speed -> key" Height="30" Margin="2,0" Background="#CBA6F7" Foreground="#1E1E2E"/>
     </UniformGrid>
     <UniformGrid Columns="2" Margin="0,2,0,4">
-      <TextBox Name="TbSpeed" Text="250" Height="30" Margin="2,0" FontSize="13"
+      <TextBox Name="TbSpeed" Text="500" Height="30" Margin="2,0" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="2,0" Background="#F5C97B" Foreground="#1E1E2E"/>
     </UniformGrid>
@@ -597,7 +600,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -617,6 +620,12 @@ function Do-PathPlay {
     # speed-driven playback: длительность сегментов = дистанция / скорость кадра
     Set-Status (Send-GameCommand "PathPlaySpeed")
 }
+function Do-PathPlayTime {
+    # равномерный режим: весь путь за N секунд из поля FLIGHT TIME
+    $sec = $controls['TbSeconds'].Text.Trim()
+    if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
+    Set-Status (Send-GameCommand "PathPlay $sec")
+}
 function Send-EscKey {
     if ( -not (Activate-Game) ) {
         Set-Status "game window not found!"
@@ -630,7 +639,8 @@ $controls['BtnHideHud'].Add_Click({ Set-Status (Send-GameCommand "HideHud") })
 $controls['BtnCam9'].Add_Click({ Set-Status (Send-GameCommand "Cam_Mode 9") })
 $controls['BtnEscMenu'].Add_Click({ Send-EscKey })
 $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
-$controls['BtnPathPlay'].Add_Click({ Do-PathPlay })
+$controls['BtnPathPlay'].Add_Click({ Do-PathPlayTime })
+$controls['BtnPathPlaySpeed'].Add_Click({ Do-PathPlay })
 $controls['BtnPathStop'].Add_Click({ Set-Status (Send-GameCommand "PathStop") })
 $controls['BtnPathList'].Add_Click({ Set-Status (Send-GameCommand "PathList") })
 $controls['BtnPathClear'].Add_Click({
