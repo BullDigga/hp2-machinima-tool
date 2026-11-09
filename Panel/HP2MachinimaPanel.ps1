@@ -305,10 +305,18 @@ $script:IniPaths = @(
     "F:\Harry Potter and the Chamber of Secrets\system\Default.ini"
 )
 $script:KeyRows = New-Object System.Collections.ArrayList
-$script:SeenSeqs = @{}      # seq кадра -> seen
-$script:KeyTimes = @{}      # seq кадра -> "HH:mm:ss" времени постановки
+$script:SeenSeqs = @{}      # "<gamepid>:<seq>" кадра -> seen
+$script:KeyTimes = @{}      # "<gamepid>:<seq>" кадра -> "HH:mm:ss" времени постановки
 $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
+# времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
+$script:KeyTimesFile = Join-Path $PSScriptRoot "key-times.txt"
+if ( Test-Path $script:KeyTimesFile ) {
+    foreach ( $ln in [System.IO.File]::ReadAllLines($script:KeyTimesFile) ) {
+        $pp = $ln.Split('|')
+        if ( $pp.Count -eq 2 -and $pp[0] -ne "" ) { $script:KeyTimes[$pp[0]] = $pp[1] }
+    }
+}
 
 function Read-SavedPathData {
     foreach ( $f in $script:IniPaths ) {
@@ -449,17 +457,31 @@ function Sync-FromLog([switch]$Force) {
         }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
 
-        # время постановки кадра: штампуем только НОВЫЕ seq (после F8/ADD KEYFRAME)
+        # время постановки кадра: штампуем только НОВЫЕ seq (после F8/ADD KEYFRAME);
+        # ключ привязан к pid игры, чтобы кадры разных сессий не путались;
+        # карта времён сохраняется в файл и переживает перезапуск панели
         $now = Get-Date -Format HH:mm:ss
+        $gpNow = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+        $pfx = "0"
+        if ( $gpNow -ne $null ) { $pfx = [string]$gpNow.Id }
+        $stampChanged = $false
         foreach ( $r in $rows ) {
-            $sk = [string]$r.Seq
+            $sk = "$pfx:$($r.Seq)"
             if ( -not $script:SeenSeqs.ContainsKey($sk) ) {
-                if ( $script:StampNextSync ) { $script:KeyTimes[$sk] = $now }
+                if ( $script:StampNextSync ) {
+                    $script:KeyTimes[$sk] = $now
+                    $stampChanged = $true
+                }
                 $script:SeenSeqs[$sk] = $true
             }
             if ( $script:KeyTimes.ContainsKey($sk) ) { $r.Time = $script:KeyTimes[$sk] }
         }
         $script:StampNextSync = $false
+        if ( $stampChanged ) {
+            $lines = @()
+            foreach ( $k in $script:KeyTimes.Keys ) { $lines += "$k|$($script:KeyTimes[$k])" }
+            try { [System.IO.File]::WriteAllLines($script:KeyTimesFile, $lines) } catch { }
+        }
     }
 
     $script:KeyRows = $rows
