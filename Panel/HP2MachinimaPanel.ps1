@@ -454,6 +454,25 @@ function Sync-FromLog([switch]$Force) {
                     $i = [int]$pp[0]
                     if ( $pp.Count -ge 2 -and $i -ge 0 -and $i -lt $rows.Count -and $pp[1] -match $isNum ) { $rows[$i].Speed = [double]$pp[1] }
                 }
+                'INS'   {
+                    # вставка кадра по индексу: INS|i,x,y,z,yaw,pitch,fov,spd
+                    $p = $e.D -split ','
+                    if ( $p.Count -ge 8 -and $p[1] -match $isNum -and $p[2] -match $isNum -and $p[3] -match $isNum ) {
+                        $i = [int]$p[0]
+                        if ( $i -lt 0 -or $i -gt $rows.Count ) { $i = $rows.Count }
+                        $r = New-Object KeyRow
+                        $r.Time  = "-"
+                        $r.Seq   = $e.Seq
+                        $r.X     = [double]$p[1]
+                        $r.Y     = [double]$p[2]
+                        $r.Z     = [double]$p[3]
+                        $r.Yaw   = [int][double]$p[4]
+                        $r.Pitch = [int][double]$p[5]
+                        $r.FOV   = [double]$p[6]
+                        if ( $p[7] -match $isNum ) { $r.Speed = [double]$p[7] } else { $r.Speed = 250 }
+                        $rows.Insert($i, $r)
+                    }
+                }
             }
         }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
@@ -543,6 +562,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="DotBrush" Color="#A6E3A1"/>
     <SolidColorBrush x:Key="SyncBrush" Color="#FF1F3D2E"/>
     <SolidColorBrush x:Key="DirtyBrush" Color="#FF3A3F4D"/>
+    <SolidColorBrush x:Key="NavBrush" Color="#FF89DCEB"/>
 
     <Style TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
@@ -640,37 +660,51 @@ function Send-PathSaveAndSync([string]$prefix) {
     </UniformGrid>
 
     <!-- main action -->
-    <Button Name="BtnPathAdd" Grid.Row="2" Content="📷  ADD KEYFRAME (PathAdd)" Height="52" Margin="3,0,3,6"
+    <Button Name="BtnPathAdd" Grid.Row="2" Content="📷  ADD KEYFRAME" Height="52" Margin="3,0,3,6"
             Background="#3FA85C" Foreground="White" FontSize="17" FontWeight="Bold"/>
 
-    <!-- play by time -->
+    <!-- two PLAY buttons stacked (time pointer inside by-TIME) + Stop spanning both -->
     <Grid Grid.Row="3" Margin="3,0,3,6">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="9*"/>
-        <ColumnDefinition Width="11*"/>
+        <ColumnDefinition Width="5*"/>
+        <ColumnDefinition Width="1.5*"/>
       </Grid.ColumnDefinitions>
-      <StackPanel Grid.Column="0" Margin="0,0,6,0">
-        <TextBlock Text="🕐 FLIGHT TIME, SEC (whole path in N seconds)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="2,0,0,4"/>
-        <TextBox Name="TbSeconds" Text="15" Height="46" FontSize="18" FontWeight="Bold"
-                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      </StackPanel>
-      <Button Name="BtnPathPlay" Grid.Column="1" Content="▶  PLAY (by TIME)" Height="70" Background="#6C71C4"
-              Foreground="White" FontSize="16" FontWeight="Bold"/>
-    </Grid>
-
-    <!-- play by speeds (3/4) + stop (1/4) -->
-    <Grid Grid.Row="4" Margin="3,0,3,6">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="3*"/>
-        <ColumnDefinition Width="1*"/>
-      </Grid.ColumnDefinitions>
-      <Button Name="BtnPathPlaySpeed" Content="▶  PLAY (by keyframe SPEEDS)" Height="46" Margin="0,0,6,0"
-              Background="#CBA6F7" Foreground="#1E1E2E" FontSize="16" FontWeight="Bold"/>
-      <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Height="46" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Grid Margin="0,0,6,0">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" CornerRadius="8" Background="#6C71C4" Margin="0,0,0,6" Padding="8,4">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Text="🕐 FLIGHT TIME, SEC — whole path in N seconds" Foreground="#C9CCEF" FontSize="11"/>
+            <Grid Grid.Row="1">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Button Name="BtnPathPlay" Content="▶  PLAY (by TIME)" Background="Transparent" BorderThickness="0"
+                      Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand"/>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,4,0">
+                <TextBox Name="TbSeconds" Text="15" Width="62" Height="32" FontSize="16" FontWeight="Bold"
+                         Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
+                         HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+                <TextBlock Text="sec" Foreground="#D0D3F0" FontSize="13" VerticalAlignment="Center" Margin="6,0,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Grid>
+        </Border>
+        <Button Name="BtnPathPlaySpeed" Grid.Row="1" Content="▶  PLAY (by keyframe SPEEDS)" Background="#CBA6F7"
+                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"/>
+      </Grid>
+      <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
     </Grid>
 
     <!-- clear -->
-    <Button Name="BtnPathClear" Grid.Row="5" Content="🗑  Clear table" Height="34" Margin="3,0,3,8"
+    <Button Name="BtnPathClear" Grid.Row="4" Content="🗑  Clear table" Height="34" Margin="3,0,3,8"
             Background="#EB6F8E" Foreground="White"/>
 
     <!-- keyframes table + map/export panel -->
@@ -697,21 +731,25 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
       </DataGrid.Columns>
     </DataGrid>
+      <Button Name="BtnRefresh" Content="⟳" Width="30" Height="30" FontSize="15" FontWeight="Bold"
+              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,8,8"
+              Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
+              BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Full table resync (full memory scan)"/>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
         <TextBlock Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
                    TextWrapping="Wrap" Margin="2,0,0,10"/>
-        <Button Name="BtnExport" Content="⤴  Export to file" Height="34" Margin="0,0,0,6"
+        <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-        <Button Name="BtnImport" Content="⤵  Import from file" Height="34"
+        <Button Name="BtnImport" Content="↙  Import from file" Height="34"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       </StackPanel>
     </Grid>
 
     <!-- table actions -->
     <UniformGrid Grid.Row="8" Columns="3" Margin="3,0,3,6">
-      <Button Name="BtnRefresh" Content="⟳  Refresh table" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="#89DCEB"/>
-      <Button Name="BtnGoto" Content="✛  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="#89DCEB"/>
+      <Button Name="BtnInsert" Content="➕  Insert after selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"/>
       <Button Name="BtnDel" Content="🗑  Delete selected key" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
     </UniformGrid>
 
@@ -759,7 +797,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','BtnExport','BtnImport','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -808,6 +846,18 @@ $controls['BtnPathClear'].Add_Click({
     Sync-AfterCommand $st
 })
 $controls['BtnRefresh'].Add_Click({ Sync-FromLog -Force })
+# вставить кадр ПОСЛЕ выбранного (захватывает текущую позицию камеры); без выбора - в конец
+$controls['BtnInsert'].Add_Click({
+    $sel = $controls['DgKeys'].SelectedItem
+    if ( $sel -ne $null ) {
+        $st = Send-GameCommand "PathInsertAt $($sel.Num)"
+        $st = "insert after #$($sel.Num) | " + $st
+    } else {
+        $st = Send-GameCommand "PathInsertAt 999999"
+        $st = "insert at end | " + $st
+    }
+    Sync-AfterCommand $st
+})
 $controls['BtnGoto'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
@@ -981,8 +1031,8 @@ $window.Add_Closing({
 
 # ---------- theme toggle (dark default) ----------
 $script:DarkTheme = $true
-$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D" }
-$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8" }
+$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB" }
+$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285" }
 function Set-Theme([bool]$dark) {
     $map = $script:DarkBrushes
     if ( -not $dark ) { $map = $script:LightBrushes }
