@@ -325,7 +325,8 @@ $script:SeenSeqs = @{}      # "<gamepid>:<seq>" кадра -> seen
 $script:KeyTimes = @{}      # "<gamepid>:<seq>" кадра -> "HH:mm:ss" времени постановки
 $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
-$script:CurrentMap = ""
+$script:CurrentMap = ""   # карта, где игра СЕЙЧАС (из MAP-событий)
+$script:KeyMap = ""       # v5.14: карта, которой принадлежат кадры в таблице
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
 $script:KeyTimesFile = Join-Path $PSScriptRoot "key-times.txt"
 if ( Test-Path $script:KeyTimesFile ) {
@@ -361,7 +362,7 @@ function Refresh-Table {
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
     if ( $n -eq 0 ) {
         # v5.12: кадров нет - метка карты смысла не имеет, сбрасываем
-        $script:CurrentMap = ""
+        $script:KeyMap = ""
         $controls['TbMap'].Text = Get-MapText
         Set-Status "table: 0 keyframes - press F8 in game to add"
     } else {
@@ -480,8 +481,12 @@ function Complete-SyncFromLog {
         $isNum = '^-?\d+(\.\d+)?$'
         foreach ( $e in ($ev | Sort-Object -Property Seq -Unique) ) {
             switch ( $e.T ) {
-                'CLEAR' { $rows.Clear() | Out-Null }
-                'DEL'   { $i = [int]$e.D; if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) } }
+                'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = "" }
+                'DEL'   {
+                    $i = [int]$e.D
+                    if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) }
+                    if ( $rows.Count -eq 0 ) { $script:KeyMap = "" }
+                }
                 'MAP'   {
                     # v5.6: имя карты идёт в том же PATHEV-потоке (событие от BaseCam.PathLogMap)
                     if ( $e.D -ne "" ) { $script:CurrentMap = $e.D }
@@ -505,6 +510,7 @@ function Complete-SyncFromLog {
                         $r.FOV   = [double]$p[5]
                         if ( $p.Count -ge 7 -and $p[6] -match $isNum ) { $r.Speed = [double]$p[6] } else { $r.Speed = 250 }
                         [void]$rows.Add($r)
+                        if ( $script:CurrentMap -ne "" ) { $script:KeyMap = $script:CurrentMap }
                     }
                 }
                 'SPEED' {
@@ -529,6 +535,7 @@ function Complete-SyncFromLog {
                         $r.FOV   = [double]$p[6]
                         if ( $p[7] -match $isNum ) { $r.Speed = [double]$p[7] } else { $r.Speed = 250 }
                         $rows.Insert($i, $r)
+                        if ( $script:CurrentMap -ne "" ) { $script:KeyMap = $script:CurrentMap }
                     }
                 }
                 'KEYFOV' {
@@ -897,7 +904,7 @@ function Send-PathSaveAndSync([string]$prefix) {
               </Grid.ColumnDefinitions>
               <Button Name="BtnPathPlay" Content="▶  PLAY (by TIME)" Background="Transparent" BorderThickness="0"
                       Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand"
-                      HorizontalContentAlignment="Left" Padding="18,4" ToolTipService.ShowOnDisabled="True"/>
+                      HorizontalContentAlignment="Left" Padding="10,4" ToolTipService.ShowOnDisabled="True"/>
               <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,4,0">
                 <TextBox Name="TbSeconds" Text="15" Width="62" Height="32" FontSize="16" FontWeight="Bold"
                          Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
@@ -1035,7 +1042,8 @@ function Set-Status([string]$s) {
 }
 
 function Get-MapText {
-    if ( $script:CurrentMap -ne "" ) { return $script:CurrentMap }
+    # v5.14: лейбл показывает карту КАДРОВ, а не где игрок сейчас
+    if ( $script:KeyMap -ne "" ) { return $script:KeyMap }
     return $script:LocData[$script:Lang].NoMap
 }
 
@@ -1148,6 +1156,14 @@ $controls['BtnPathStop'].Add_Click({
     Set-Status $st
 })
 $controls['BtnPathClear'].Add_Click({
+    # v5.14: игра закрыта - чистим таблицу локально (команды отправлять некому)
+    if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+        $script:KeyRows.Clear()
+        $script:KeyMap = ""
+        Refresh-Table
+        Set-Status "game is not running - table cleared locally"
+        return
+    }
     $st = Send-GameCommand "PathClear"
     Sync-AfterCommand $st
 })
@@ -1176,6 +1192,16 @@ $delHandler = [System.Windows.RoutedEventHandler]{
     if ( $b -is [System.Windows.Controls.Button] -and $b.Tag -ne $null ) {
         try {
             $idx = [int]$b.Tag
+            # v5.14: игра закрыта - удаляем строку локально
+            if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+                if ( $idx -ge 0 -and $idx -lt $script:KeyRows.Count ) {
+                    $script:KeyRows.RemoveAt($idx)
+                    for ( $k = 0; $k -lt $script:KeyRows.Count; $k++ ) { $script:KeyRows[$k].Num = $k }
+                    Refresh-Table
+                    Set-Status "game is not running - keyframe deleted locally"
+                }
+                return
+            }
             $st = Send-GameCommand "PathDel $idx"
             Send-PathSaveAndSync $st
         } catch { }
@@ -1251,7 +1277,7 @@ $controls['BtnExport'].Add_Click({
     if ( $script:KeyRows.Count -eq 0 ) { Set-Status "no keyframes to export"; return }
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
     $dlg.Filter = "HP2 path (*.hp2path)|*.hp2path|All files (*.*)|*.*"
-    $dlg.FileName = "$($script:CurrentMap).hp2path"
+    $dlg.FileName = "$($script:KeyMap).hp2path"
     if ( $dlg.ShowDialog() ) {
         $lines = @("# map=$($script:CurrentMap)  format: x,y,z,yaw,pitch,fov,speed")
         foreach ( $r in $script:KeyRows ) {
@@ -1268,8 +1294,28 @@ $controls['BtnImport'].Add_Click({
     $dlg.Filter = "HP2 path (*.hp2path)|*.hp2path|All files (*.*)|*.*"
     if ( $dlg.ShowDialog() ) {
         try {
-            $lines = [System.IO.File]::ReadAllLines($dlg.FileName) | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") }
+            $allLines = [System.IO.File]::ReadAllLines($dlg.FileName)
+            $lines = $allLines | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") }
         } catch { Set-Status "import failed: $($_.Exception.Message)"; return }
+        # v5.14: файл хранит карту кадров - если она не запущена, спрашиваем
+        $fileMap = ""
+        foreach ( $ln in $allLines ) {
+            if ( $ln.StartsWith("#") ) {
+                $m = [regex]::Match($ln, '#\s*map=([A-Za-z0-9_]+)')
+                if ( $m.Success ) { $fileMap = $m.Groups[1].Value; break }
+            }
+        }
+        if ( $fileMap -ne "" -and $script:CurrentMap -ne "" -and $fileMap -ne $script:CurrentMap ) {
+            $L = $script:LocData[$script:Lang]
+            $msg = ($L.LoadMapQ -f $fileMap, $script:CurrentMap)
+            $r = [System.Windows.MessageBox]::Show($msg, $L.LoadMapTitle, 'YesNo', 'Question')
+            if ( $r -ne 'Yes' ) { Set-Status "import cancelled"; return }
+            Set-Status ("loading map $($fileMap)...")
+            [void](Send-GameCommand "open $($fileMap).unr")
+            Start-Sleep -Seconds 8
+            $script:PendingFullSync = $true
+            $script:FullRetryDone = $false
+        }
         $cmds = @("PathClear")
         $n = 0
         foreach ( $ln in $lines ) {
@@ -1312,7 +1358,14 @@ $controls['DgKeys'].Add_CellEditEnding({
 })
 $controls['DgKeys'].Add_MouseDoubleClick({
     $sel = $controls['DgKeys'].SelectedItem
-    if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
+    if ( $sel -eq $null ) { return }
+    # v5.14: кадры с другой карты - переходить нельзя
+    if ( $script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap ) {
+        $L = $script:LocData[$script:Lang]
+        Set-Status $L.TipWrongMap
+        return
+    }
+    Set-Status (Send-GameCommand "PathGoto $($sel.Num)")
 })
 
 # ---------- global hotkeys ----------
@@ -1395,9 +1448,25 @@ function Update-SelectionButtons {
         return
     }
     $has = $controls['DgKeys'].SelectedItem -ne $null
-    foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
     $n = 0
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
+    # v5.14: кадры с другой карты - нельзя добавлять/воспроизводить/переходить
+    $wrong = ($script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)
+    if ( $wrong ) {
+        foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed')) ) {
+            try { $controls[$b].IsEnabled = $false } catch { }
+        }
+        $L = $null
+        if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
+        if ( $L -ne $null ) {
+            foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed')) ) {
+                try { $controls[$b].ToolTip = $L.TipWrongMap } catch { }
+            }
+        }
+        Set-Status ("keyframes are from '$($script:KeyMap)', but '$($script:CurrentMap)' is loaded - load the keyframe map or clear the table")
+        return
+    }
+    foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
     foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
     $controls['BtnPathClear'].IsEnabled = ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = $false
@@ -1477,6 +1546,9 @@ $script:LocData = @{
         TipNeedKeys = "Add at least one keyframe first (F8)"
         TipStop = "Nothing is playing right now"
         OneKey = "only 1 key - jumped to it"
+        TipWrongMap = "Keyframes belong to a different map - load it or clear the table"
+        LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
+        LoadMapTitle = "Different map"
     }
     ru = @{
         HudHide = "🙈  Скрыть HUD"; HudShow = "👁  Показать HUD"
@@ -1497,6 +1569,9 @@ $script:LocData = @{
         TipNeedKeys = "Сначала добавьте хотя бы один кадр (F8)"
         TipStop = "Сейчас ничего не воспроизводится"
         OneKey = "всего один кадр - перешли к нему"
+        TipWrongMap = "Кадры с другой карты - загрузите её или очистите таблицу"
+        LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
+        LoadMapTitle = "Другая карта"
     }
 }
 $script:Lang = "en"
