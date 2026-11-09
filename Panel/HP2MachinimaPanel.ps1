@@ -683,6 +683,28 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Setter Property="BorderBrush" Value="{DynamicResource LineBrush}"/>
       <Setter Property="BorderThickness" Value="0,0,1,1"/>
     </Style>
+    <!-- v5.12.3: ContextMenu без серой подложки - просто белый скруглённый борд с тенью -->
+    <Style TargetType="ContextMenu">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ContextMenu">
+            <Border x:Name="CmB" Background="White" BorderBrush="#FFB8BFCC" BorderThickness="1"
+                    CornerRadius="6" Padding="4">
+              <ItemsPresenter/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="HasDropShadow" Value="True">
+                <Setter TargetName="CmB" Property="Effect">
+                  <Setter.Value>
+                    <DropShadowEffect BlurRadius="14" ShadowDepth="2" Opacity="0.35"/>
+                  </Setter.Value>
+                </Setter>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
   </Window.Resources>
   <Grid Margin="12">
     <Grid.RowDefinitions>
