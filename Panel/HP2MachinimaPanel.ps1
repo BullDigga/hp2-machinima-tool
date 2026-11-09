@@ -88,6 +88,7 @@ public static class GameCtl {
 Add-Type -TypeDefinition @"
 public class KeyRow {
     public int Num { get; set; }
+    public string Time { get; set; }
     public double X { get; set; }
     public double Y { get; set; }
     public double Z { get; set; }
@@ -95,6 +96,7 @@ public class KeyRow {
     public int Pitch { get; set; }
     public double FOV { get; set; }
     public double Speed { get; set; }
+    public long Seq { get; set; }
 }
 "@
 
@@ -265,6 +267,9 @@ $script:IniPaths = @(
     "F:\Harry Potter and the Chamber of Secrets\system\Default.ini"
 )
 $script:KeyRows = New-Object System.Collections.ArrayList
+$script:SeenSeqs = @{}      # seq кадра -> seen
+$script:KeyTimes = @{}      # seq кадра -> "HH:mm:ss" времени постановки
+$script:StampNextSync = $false
 
 function Read-SavedPathData {
     foreach ( $f in $script:IniPaths ) {
@@ -333,6 +338,8 @@ function Sync-FromLog {
                     if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum ) {
                         $r = New-Object KeyRow
                         $r.Num   = $rows.Count
+                        $r.Time  = "-"
+                        $r.Seq   = $e.Seq
                         $r.X     = [double]$p[0]
                         $r.Y     = [double]$p[1]
                         $r.Z     = [double]$p[2]
@@ -351,6 +358,18 @@ function Sync-FromLog {
             }
         }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
+
+        # время постановки кадра: штампуем только НОВЫЕ seq (после F8/ADD KEYFRAME)
+        $now = Get-Date -Format HH:mm:ss
+        foreach ( $r in $rows ) {
+            $sk = [string]$r.Seq
+            if ( -not $script:SeenSeqs.ContainsKey($sk) ) {
+                if ( $script:StampNextSync ) { $script:KeyTimes[$sk] = $now }
+                $script:SeenSeqs[$sk] = $true
+            }
+            if ( $script:KeyTimes.ContainsKey($sk) ) { $r.Time = $script:KeyTimes[$sk] }
+        }
+        $script:StampNextSync = $false
     }
 
     $script:KeyRows = $rows
@@ -403,20 +422,18 @@ function Send-PathSaveAndSync([string]$prefix) {
     </Style>
   </Window.Resources>
   <StackPanel Margin="10">
-    <Grid Margin="0,0,0,2">
+    <Grid Name="HdrGrid" Background="Transparent" Margin="0,0,0,2">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="28"/>
       </Grid.ColumnDefinitions>
-      <TextBlock Name="TbTitle" Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
-                 HorizontalAlignment="Center" Margin="0,0,28,0" Cursor="Hand"/>
+      <TextBlock Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
+                 HorizontalAlignment="Center" Margin="0,0,28,0"/>
       <Button Name="BtnClose" Grid.Column="1" Content="X" Width="24" Height="22" FontWeight="Bold"
               Background="#F38BA8" Foreground="#1E1E2E" BorderThickness="0"/>
     </Grid>
     <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 Clear" Foreground="#F9E2AF"
                FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,2"/>
-    <CheckBox Name="CbTransparent" Content="Transparent panel (see game behind)" Foreground="#A6ADC8"
-              FontSize="11" HorizontalAlignment="Center" Margin="0,0,0,6"/>
     <UniformGrid Columns="3" Margin="0,0,0,4">
       <Button Name="BtnHideHud" Content="HideHud" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnCam9" Content="Cam_Mode 9" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
@@ -444,6 +461,7 @@ function Send-PathSaveAndSync([string]$prefix) {
               AlternatingRowBackground="#313244">
       <DataGrid.Columns>
         <DataGridTextColumn Header="#" Width="30" Binding="{Binding Num}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Time" Width="60" Binding="{Binding Time}" IsReadOnly="True"/>
         <DataGridTextColumn Header="X" Width="62" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Y" Width="62" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Z" Width="62" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
@@ -471,7 +489,15 @@ function Send-PathSaveAndSync([string]$prefix) {
     </UniformGrid>
     <Button Name="BtnSpeedAll" Content="Speed -> ALL keyframes (value from box above)" Height="30" Margin="0,2,0,4"
             Background="#FAE3B0" Foreground="#1E1E2E" FontWeight="Bold"/>
-    <TextBlock Name="TbStatus" Text="ready" Foreground="#94E2D5" FontSize="11" Margin="2,2,0,0" TextWrapping="Wrap"/>
+    <Grid Margin="2,4,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Name="TbStatus" Text="ready" Foreground="#94E2D5" FontSize="11" TextWrapping="Wrap"/>
+      <CheckBox Name="CbTransparent" Grid.Column="1" Content="Transparent" Foreground="#A6ADC8"
+                FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0"/>
+    </Grid>
   </StackPanel>
 </Window>
 "@
@@ -480,7 +506,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','TbTitle','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -492,6 +518,7 @@ function Do-PathAdd {
     # скорость кадра = поле fly speed: применяем её перед добавлением
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
+    $script:StampNextSync = $true   # новый кадр получит время постановки
     $st = Send-GameCommands @("Cam_MoveSpeed $sp", "PathAdd")
     Sync-AfterCommand $st
 }
@@ -562,10 +589,10 @@ $controls['BtnSpeedAll'].Add_Click({
     Sync-AfterCommand $st
 })
 # прозрачность панели (честная: AllowsTransparency)
-$controls['CbTransparent'].Add_Checked({   $window.Opacity = 0.55; Set-Status "panel transparent (55%)" })
+$controls['CbTransparent'].Add_Checked({   $window.Opacity = 0.8; Set-Status "panel transparent (80%)" })
 $controls['CbTransparent'].Add_Unchecked({ $window.Opacity = 1.0 })
-# свой заголовок: перетаскивание за надпись, крестик закрывает
-$controls['TbTitle'].Add_MouseLeftButtonDown({ try { $window.DragMove() } catch { } })
+# перетаскивание за ВСЮ верхнюю панель, крестик закрывает
+$controls['HdrGrid'].Add_MouseLeftButtonDown({ try { $window.DragMove() } catch { } })
 $controls['BtnClose'].Add_Click({ $window.Close() })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
 $controls['DgKeys'].Add_CellEditEnding({
