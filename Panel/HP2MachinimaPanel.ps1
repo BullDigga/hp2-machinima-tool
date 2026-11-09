@@ -218,7 +218,7 @@ public class MemScanPanel {
 }
 "@
 
-$VK = @{ grave = 0xC0; enter = 0x0D; space = 0x20; shift = 0x10 }
+$VK = @{ grave = 0xC0; enter = 0x0D; space = 0x20; shift = 0x10; numpad0 = 0x60 }
 for ($i = 0; $i -lt 26; $i++) { $VK[[string][char](65 + $i)] = 0x41 + $i }
 for ($i = 0; $i -lt 10; $i++) { $VK[[string][char](48 + $i)] = 0x30 + $i }
 $VK['_'] = 0xBD
@@ -243,44 +243,41 @@ function Type-Command([string]$cmd) {
 
 # NOTE: the game must be the foreground window (user is playing/flying).
 # We do NOT switch focus: grave -> type -> enter -> grave right into the focused game.
-function Send-GameCommand([string]$cmd) {
-    $h = Find-GameWindow
-    if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
+# v5.7: ТИХИЙ КАНАЛ - консоль игры больше НЕ открывается. Панель пишет команды в
+# system\PanelCmds.ini и жмёт NumPad0 (bind "NumPad0=exec PanelCmds.ini" в DefUser.ini) -
+# движок сам выполняет строки файла через exec, никакого окна консоли и фокуса ввода.
+$script:CmdsFile = "F:\Harry Potter and the Chamber of Secrets\system\PanelCmds.ini"
+$script:ExecKeyVk = 0x60    # NumPad0
+$script:UseExec = $true     # fallback: старая консоль (grave), если exec-канал не работает
+
+function Focus-GameWindow([IntPtr]$h) {
     $fg = [GameCtl]::GetForegroundWindow()
-    if ($fg -ne $h) {
-        # ????????????/???????????? ???????? ?? ????????????: ???????????????????? ???????? (???????? ??????????????)
-        [GameCtl]::ShowWindow($h, 9) | Out-Null
-        [GameCtl]::Tap(0x12) | Out-Null
-        [GameCtl]::SetForegroundWindow($h) | Out-Null
-        Start-Sleep -Milliseconds 180
-        $fg = [GameCtl]::GetForegroundWindow()
-        if ($fg -ne $h) {
-            return "could not focus the game - click the game window once"
-        }
-    }
-    [GameCtl]::Tap([uint16]$VK['grave'])
-    Start-Sleep -Milliseconds 120
-    Type-Command $cmd
-    [GameCtl]::Tap([uint16]$VK['enter'])
-    Start-Sleep -Milliseconds 150
-    [GameCtl]::Tap([uint16]$VK['grave'])
-    Start-Sleep -Milliseconds 80
-    return "$cmd  OK  " + (Get-Date -Format HH:mm:ss)
+    if ($fg -eq $h) { return $true }
+    [GameCtl]::ShowWindow($h, 9) | Out-Null
+    [GameCtl]::Tap(0x12) | Out-Null
+    [GameCtl]::SetForegroundWindow($h) | Out-Null
+    Start-Sleep -Milliseconds 180
+    return ([GameCtl]::GetForegroundWindow() -eq $h)
 }
 
-# несколько команд за ОДНУ сессию консоли (быстро: одно открытие/закрытие)
-function Send-GameCommands([string[]]$cmds) {
+# тихий путь: файл + один бинд-кей
+function Send-GameCommandsExec([string[]]$cmds) {
     $h = Find-GameWindow
     if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
-    $fg = [GameCtl]::GetForegroundWindow()
-    if ($fg -ne $h) {
-        [GameCtl]::ShowWindow($h, 9) | Out-Null
-        [GameCtl]::Tap(0x12) | Out-Null
-        [GameCtl]::SetForegroundWindow($h) | Out-Null
-        Start-Sleep -Milliseconds 180
-        $fg2 = [GameCtl]::GetForegroundWindow()
-        if ($fg2 -ne $h) { return "could not focus the game - click the game window once" }
-    }
+    try {
+        [System.IO.File]::WriteAllLines($script:CmdsFile, $cmds, [System.Text.Encoding]::ASCII)
+    } catch { return "write PanelCmds.ini failed: $($_.Exception.Message)" }
+    if ( -not (Focus-GameWindow $h) ) { return "could not focus the game - click the game window once" }
+    [GameCtl]::Tap([uint16]$script:ExecKeyVk)
+    Start-Sleep -Milliseconds 120
+    return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
+}
+
+# резервный путь: консоль игры (grave -> текст -> enter -> grave)
+function Send-GameCommandsConsole([string[]]$cmds) {
+    $h = Find-GameWindow
+    if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
+    if ( -not (Focus-GameWindow $h) ) { return "could not focus the game - click the game window once" }
     [GameCtl]::Tap([uint16]$VK['grave'])
     Start-Sleep -Milliseconds 120
     foreach ($c in $cmds) {
@@ -292,6 +289,13 @@ function Send-GameCommands([string[]]$cmds) {
     Start-Sleep -Milliseconds 80
     return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
 }
+
+function Send-GameCommands([string[]]$cmds) {
+    if ( $script:UseExec ) { return Send-GameCommandsExec $cmds }
+    return Send-GameCommandsConsole $cmds
+}
+
+function Send-GameCommand([string]$cmd) { return Send-GameCommands @($cmd) }
 
 # ---------- keyframe table: источник истины = лог игры ----------
 # v4.3: ini-канал мёртв (SaveConfig молчит в M212 даже из HPConsole). Вместо него:
@@ -309,7 +313,7 @@ $script:SeenSeqs = @{}      # "<gamepid>:<seq>" кадра -> seen
 $script:KeyTimes = @{}      # "<gamepid>:<seq>" кадра -> "HH:mm:ss" времени постановки
 $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
-$script:CurrentMap = "(no map)"
+$script:CurrentMap = ""
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
 $script:KeyTimesFile = Join-Path $PSScriptRoot "key-times.txt"
 if ( Test-Path $script:KeyTimesFile ) {
@@ -436,6 +440,10 @@ function Sync-FromLog([switch]$Force) {
                     # v5.6: имя карты идёт в том же PATHEV-потоке (событие от BaseCam.PathLogMap)
                     if ( $e.D -ne "" ) { $script:CurrentMap = $e.D }
                 }
+                'PLAYEND' {
+                    # v5.7: проигрывание закончилось само - гасим красный Stop
+                    if ( $script:Playing ) { Set-Playing $false }
+                }
                 'ADD'   {
                     $p = $e.D -split ','
                     if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum ) {
@@ -518,7 +526,7 @@ function Sync-FromLog([switch]$Force) {
         # текущая карта - из событий LoadMap в логе
         $lm = [regex]::Match($txt, 'LoadMap: ([A-Za-z0-9_]+)')
         if ( $lm.Success ) { $script:CurrentMap = $lm.Groups[1].Value }
-        $controls['TbMap'].Text = $script:CurrentMap
+        $controls['TbMap'].Text = Get-MapText
     }
 
     $script:KeyRows = $rows
@@ -575,6 +583,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="SyncBrush" Color="#FF1F3D2E"/>
     <SolidColorBrush x:Key="DirtyBrush" Color="#FF3A3F4D"/>
     <SolidColorBrush x:Key="NavBrush" Color="#FF89DCEB"/>
+    <SolidColorBrush x:Key="HdrBrush" Color="#FF313244"/>
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
 
     <Style TargetType="Button">
@@ -612,11 +621,11 @@ function Send-PathSaveAndSync([string]$prefix) {
       </Setter>
     </Style>
     <Style TargetType="{x:Type DataGridColumnHeader}">
-      <Setter Property="Background" Value="#313244"/>
-      <Setter Property="Foreground" Value="#CDD6F4"/>
+      <Setter Property="Background" Value="{DynamicResource HdrBrush}"/>
+      <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
       <Setter Property="FontWeight" Value="Bold"/>
       <Setter Property="Padding" Value="6,4"/>
-      <Setter Property="BorderBrush" Value="#585B70"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource LineBrush}"/>
       <Setter Property="BorderThickness" Value="0,0,1,1"/>
     </Style>
   </Window.Resources>
@@ -642,6 +651,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
         <Image Name="ImgOwl" Width="26" Height="26" Margin="2,0,8,0"/>
@@ -649,21 +659,52 @@ function Send-PathSaveAndSync([string]$prefix) {
       </StackPanel>
       <UniformGrid Grid.Column="1" Columns="4" VerticalAlignment="Center" Margin="0,0,10,0">
         <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  frame"/></TextBlock>
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Name="TxHkFrame" Foreground="{DynamicResource MutedBrush}" Text="  frame"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Name="TxHkPlay" Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  stop"/></TextBlock>
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Name="TxHkStop" Foreground="{DynamicResource MutedBrush}" Text="  stop"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Name="TxHkClear" Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
-      <Button Name="BtnTheme" Grid.Column="2" Content="☀" Width="34" Height="30" FontSize="14" BorderThickness="0"
+      <Button Name="BtnLang" Grid.Column="2" Width="34" Height="30" Margin="0,0,12,0" BorderThickness="0"
+              Background="{DynamicResource PanelBrush}" Cursor="Hand" ToolTip="Language / Язык">
+        <Grid>
+          <Border Name="FlagEN" CornerRadius="3" Width="22" Height="15" ClipToBounds="True">
+            <Canvas Width="22" Height="15">
+              <Rectangle Width="22" Height="15" Fill="#012169"/>
+              <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+              <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+              <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+              <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+              <Rectangle Width="22" Height="5.4" Canvas.Top="4.8" Fill="White"/>
+              <Rectangle Width="5.4" Height="15" Canvas.Left="8.3" Fill="White"/>
+              <Rectangle Width="22" Height="3.2" Canvas.Top="5.9" Fill="#C8102E"/>
+              <Rectangle Width="3.2" Height="15" Canvas.Left="9.4" Fill="#C8102E"/>
+            </Canvas>
+          </Border>
+          <Border Name="FlagRU" CornerRadius="3" Width="22" Height="15" ClipToBounds="True" Visibility="Collapsed">
+            <Canvas Width="22" Height="15">
+              <Rectangle Width="22" Height="5" Fill="White" Stroke="#B0B7C3" StrokeThickness="0.6"/>
+              <Rectangle Canvas.Top="5" Width="22" Height="5" Fill="#0039A6"/>
+              <Rectangle Canvas.Top="10" Width="22" Height="5" Fill="#D52B1E"/>
+            </Canvas>
+          </Border>
+        </Grid>
+        <Button.ContextMenu>
+          <ContextMenu>
+            <MenuItem Header="🇬🇧 English" Tag="en"/>
+            <MenuItem Header="🇷🇺 Русский" Tag="ru"/>
+          </ContextMenu>
+        </Button.ContextMenu>
+      </Button>
+      <Button Name="BtnTheme" Grid.Column="3" Content="☀" Width="34" Height="30" FontSize="14" BorderThickness="0"
               Margin="0,0,12,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnClose" Grid.Column="3" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
+      <Button Name="BtnClose" Grid.Column="4" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
@@ -706,7 +747,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <TextBox Name="TbSeconds" Text="15" Width="62" Height="32" FontSize="16" FontWeight="Bold"
                          Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
                          HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
-                <TextBlock Text="sec" Foreground="#D0D3F0" FontSize="13" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                <TextBlock Name="TxSec" Text="sec" Foreground="#D0D3F0" FontSize="13" VerticalAlignment="Center" Margin="6,0,0,0"/>
               </StackPanel>
             </Grid>
           </Grid>
@@ -721,11 +762,11 @@ function Send-PathSaveAndSync([string]$prefix) {
     <!-- (clear = trash icon inside the table, bottom-left) -->
 
     <!-- keyframes table + map/export panel -->
-    <TextBlock Grid.Row="6" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
+    <TextBlock Grid.Row="6" Name="TxFramesLabel" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
     <Grid Grid.Row="7" Margin="3,0,3,6">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="3*"/>
-        <ColumnDefinition Width="1*"/>
+        <ColumnDefinition Width="5*"/>
+        <ColumnDefinition Width="1.5*"/>
       </Grid.ColumnDefinitions>
       <DataGrid Name="DgKeys" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
@@ -753,16 +794,16 @@ function Send-PathSaveAndSync([string]$prefix) {
         </DataGridTemplateColumn>
       </DataGrid.Columns>
     </DataGrid>
-      <Button Name="BtnRefresh" Content="⟳" Width="30" Height="30" FontSize="15" FontWeight="Bold"
+      <Button Name="BtnRefresh" Content="⟳" Width="34" Height="34" FontSize="19" FontWeight="Bold"
               HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,8,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
-              BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Full table resync (full memory scan)"/>
+              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)"/>
       <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
               Background="#EB6F8E" Foreground="White"
               BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)"/>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
-        <TextBlock Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
+        <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
                    TextWrapping="Wrap" Margin="2,0,0,10"/>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
@@ -797,7 +838,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Grid.Row="0" Grid.Column="2" Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,4" Background="#6C71C4" Foreground="White"/>
       <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold"/>
       <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold"/>
-      <TextBlock Grid.Row="1" Grid.Column="0" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <TextBlock Grid.Row="1" Grid.Column="0" Name="TxFlySpeed" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
       <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="500" Width="56" Height="30" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
@@ -825,12 +866,17 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
 function Set-Status([string]$s) {
     $controls['TbStatus'].Text = $s
+}
+
+function Get-MapText {
+    if ( $script:CurrentMap -ne "" ) { return $script:CurrentMap }
+    return $script:LocData[$script:Lang].NoMap
 }
 
 function Do-PathAdd {
@@ -843,15 +889,67 @@ function Do-PathAdd {
     Update-ParamBox "speed"
     Sync-AfterCommand $st
 }
+# v5.7: Stop красный, пока идёт показ; гаснет по клику на Stop или по PLAYEND из игры
+$script:Playing = $false
+$script:PlayWatch = $null
+function Set-Playing([bool]$p) {
+    $script:Playing = $p
+    if ( $p ) {
+        $controls['BtnPathStop'].Background = "#E5484D"
+        $controls['BtnPathStop'].Foreground = "White"
+    } else {
+        $controls['BtnPathStop'].Background = $window.Resources['PanelBrush']
+        $controls['BtnPathStop'].Foreground = $window.Resources['TextBrush']
+    }
+    if ( $p -and $script:PlayWatch -eq $null ) {
+        # таймер синка, пока играем: ловит PLAYEND из памяти игры
+        $script:PlayWatch = New-Object System.Windows.Threading.DispatcherTimer
+        $script:PlayWatch.Interval = [TimeSpan]::FromMilliseconds(350)
+        $script:PlayWatch.Add_Tick({
+            if ( $script:Playing ) { Sync-FromLog }
+            if ( -not $script:Playing ) { $script:PlayWatch.Stop(); $script:PlayWatch = $null }
+        })
+        $script:PlayWatch.Start()
+    }
+}
+function Start-PlayFallback([double]$dur) {
+    # страховка: если PLAYEND не поймали, гасим Stop через длительность показа + запас
+    $fb = New-Object System.Windows.Threading.DispatcherTimer
+    $fb.Interval = [TimeSpan]::FromSeconds($dur + 1.5)
+    $fb.Add_Tick({
+        param($s, $e)
+        if ( $script:Playing ) { Set-Playing $false }
+        $s.Stop()
+    })
+    $fb.Start()
+}
+function Get-PathTotalDur {
+    # как PathPlaySpeedPath в игре: сумма (дистанция / скорость кадра)
+    $tot = 0.0
+    for ( $i = 0; $i -lt $script:KeyRows.Count - 1; $i++ ) {
+        $a = $script:KeyRows[$i]; $b = $script:KeyRows[$i + 1]
+        $d = [Math]::Sqrt([Math]::Pow($b.X - $a.X, 2) + [Math]::Pow($b.Y - $a.Y, 2) + [Math]::Pow($b.Z - $a.Z, 2))
+        $sp = $a.Speed
+        if ( $sp -le 0 ) { $sp = 250 }
+        $seg = $d / $sp
+        if ( $seg -lt 0.05 ) { $seg = 0.05 }
+        $tot += $seg
+    }
+    return $tot
+}
 function Do-PathPlay {
     # speed-driven playback: длительность сегментов = дистанция / скорость кадра
-    Set-Status (Send-GameCommand "PathPlaySpeed")
+    $st = Send-GameCommand "PathPlaySpeed"
+    if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback (Get-PathTotalDur) }
+    Set-Status $st
 }
 function Do-PathPlayTime {
     # равномерный режим: весь путь за N секунд из поля FLIGHT TIME
     $sec = $controls['TbSeconds'].Text.Trim()
     if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
-    Set-Status (Send-GameCommand "PathPlay $sec")
+    $st = Send-GameCommand "PathPlay $sec"
+    if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback ([double]$sec) }
+    Set-Status $st
 }
 # HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ: панель помнит состояние и шлёт команду только при смене
 $script:HudHidden = $false
@@ -868,7 +966,11 @@ $controls['BtnHudShow'].Add_Click({
 $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
 $controls['BtnPathPlay'].Add_Click({ Do-PathPlayTime })
 $controls['BtnPathPlaySpeed'].Add_Click({ Do-PathPlay })
-$controls['BtnPathStop'].Add_Click({ Set-Status (Send-GameCommand "PathStop") })
+$controls['BtnPathStop'].Add_Click({
+    $st = Send-GameCommand "PathStop"
+    Set-Playing $false
+    Set-Status $st
+})
 $controls['BtnPathClear'].Add_Click({
     $st = Send-GameCommand "PathClear"
     Sync-AfterCommand $st
@@ -1056,7 +1158,7 @@ $window.Add_Loaded({
             switch ($id) {
                 1 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathAdd }) | Out-Null }
                 2 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathPlay }) | Out-Null }
-                3 { $window.Dispatcher.BeginInvoke([Action]{ Set-Status (Send-GameCommand "PathStop") }) | Out-Null }
+                3 { $window.Dispatcher.BeginInvoke([Action]{ $st = Send-GameCommand "PathStop"; Set-Playing $false; Set-Status $st }) | Out-Null }
                 4 {
                     # F11 = PathClear + сброс ini + таблица
                     $window.Dispatcher.BeginInvoke([Action]{
@@ -1071,6 +1173,20 @@ $window.Add_Loaded({
     })
     Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
     Sync-FromLog -Force
+    # v5.7: проверка ТИХОГО канала команд: PathPing даёт новое событие в памяти игры.
+    # Поймали -> exec-канал жив (консоль не открывается); нет -> fallback на консоль (grave).
+    if ( (Find-GameWindow) -ne [IntPtr]::Zero ) {
+        $beforeSeq = $script:ScanCache.LastSeq
+        [void](Send-GameCommands @("PathPing"))
+        Start-Sleep -Milliseconds 700
+        Sync-FromLog -Force
+        if ( $script:ScanCache.LastSeq -gt $beforeSeq ) {
+            Set-Status "cmd channel: exec (silent) OK"
+        } else {
+            $script:UseExec = $false
+            Set-Status "cmd channel: console fallback (bind NumPad0/exec missing)"
+        }
+    }
 })
 
 $window.Add_Closing({
@@ -1080,8 +1196,8 @@ $window.Add_Closing({
 
 # ---------- theme toggle (dark default) ----------
 $script:DarkTheme = $true
-$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB" }
-$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285" }
+$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB"; HdrBrush = "#FF313244" }
+$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285"; HdrBrush = "#FFE4EAF3" }
 function Set-Theme([bool]$dark) {
     $script:DarkTheme = $dark   # фикс: без этого оба клика вычисляли одну и ту же цель
     $map = $script:DarkBrushes
@@ -1097,6 +1213,111 @@ function Set-Theme([bool]$dark) {
     Update-ParamBox "speed"
 }
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
+
+# ---------- localization (EN default / RU) ----------
+$script:LocData = @{
+    en = @{
+        HudHide = "🙈  Hide HUD"; HudShow = "👁  Show HUD"
+        AddKey = "📷  ADD KEYFRAME"
+        PlayTime = "▶  PLAY (by TIME)"; Sec = "sec"
+        PlaySpeed = "▶  PLAY (by keyframe SPEEDS)"; Stop = "■  Stop"
+        Keyframes = "▦ KEYFRAMES (double-click = go to key; Speed editable)"
+        NoMap = "(no map)"; Map = "🗺 MAP"
+        Export = "↗  Export to file"; Import = "↙  Import from file"
+        Insert = "➕  Insert after selected"; Goto = "📍  Go to selected"
+        Fov = "📷 FOV"; FlySpeed = "✈ Fly speed"
+        SetFov = "Set FOV"; FovKey = "🎯 FOV → key"; FovAll = "🌐 FOV → ALL"
+        SetSpeed = "Set fly speed"; SpeedKey = "⚡ Speed → key"; SpeedAll = "🗂 Speed → ALL"
+        Transparent = "Transparent"
+        HkFrame = "  frame"; HkPlay = "  play"; HkStop = "  stop"; HkClear = "  clear"
+    }
+    ru = @{
+        HudHide = "🙈  Скрыть HUD"; HudShow = "👁  Показать HUD"
+        AddKey = "📷  ДОБАВИТЬ КАДР"
+        PlayTime = "▶  ПЛЕЙ (по времени)"; Sec = "сек"
+        PlaySpeed = "▶  ПЛЕЙ (по скоростям кадров)"; Stop = "■  Стоп"
+        Keyframes = "▦ КАДРЫ (двойной клик = перейти; Speed правится)"
+        NoMap = "(нет карты)"; Map = "🗺 КАРТА"
+        Export = "↗  Экспорт в файл"; Import = "↙  Импорт из файла"
+        Insert = "➕  Вставить после выбранного"; Goto = "📍  Перейти к выбранному"
+        Fov = "📷 FOV"; FlySpeed = "✈ Скорость полёта"
+        SetFov = "Задать FOV"; FovKey = "🎯 FOV → кадр"; FovAll = "🌐 FOV → ВСЕ"
+        SetSpeed = "Задать скорость"; SpeedKey = "⚡ Скор. → кадр"; SpeedAll = "🗂 Скор. → ВСЕ"
+        Transparent = "Прозрачность"
+        HkFrame = "  кадр"; HkPlay = "  плей"; HkStop = "  стоп"; HkClear = "  очистка"
+    }
+}
+$script:Lang = "en"
+function Set-Lang([string]$lang) {
+    $script:Lang = $lang
+    $L = $script:LocData[$lang]
+    $controls['BtnHudHide'].Content = $L.HudHide
+    $controls['BtnHudShow'].Content = $L.HudShow
+    $controls['BtnPathAdd'].Content = $L.AddKey
+    $controls['BtnPathPlay'].Content = $L.PlayTime
+    $controls['BtnPathPlaySpeed'].Content = $L.PlaySpeed
+    if ( -not $script:Playing ) { $controls['BtnPathStop'].Content = $L.Stop }
+    $controls['BtnExport'].Content = $L.Export
+    $controls['BtnImport'].Content = $L.Import
+    $controls['BtnInsert'].Content = $L.Insert
+    $controls['BtnGoto'].Content = $L.Goto
+    $controls['BtnSetFov'].Content = $L.SetFov
+    $controls['BtnFovKey'].Content = $L.FovKey
+    $controls['BtnFovAll'].Content = $L.FovAll
+    $controls['BtnSpeed'].Content = $L.SetSpeed
+    $controls['BtnKeySpeed'].Content = $L.SpeedKey
+    $controls['BtnSpeedAll'].Content = $L.SpeedAll
+    $controls['CbTransparent'].Content = $L.Transparent
+    $controls['TxHkFrame'].Text = $L.HkFrame
+    $controls['TxHkPlay'].Text = $L.HkPlay
+    $controls['TxHkStop'].Text = $L.HkStop
+    $controls['TxHkClear'].Text = $L.HkClear
+    $controls['TxFramesLabel'].Text = $L.Keyframes
+    $controls['TbMapLabel'].Text = $L.Map
+    $controls['TxSec'].Text = $L.Sec
+    $controls['TxFlySpeed'].Text = $L.FlySpeed
+    $controls['TbMap'].Text = Get-MapText
+    $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
+    $controls['FlagRU'].Visibility = if ( $lang -eq "ru" ) { "Visible" } else { "Collapsed" }
+    Save-Settings
+}
+# выпадающий список языков по клику на флаг
+$controls['BtnLang'].Add_Click({
+    $cm = $controls['BtnLang'].ContextMenu
+    $cm.PlacementTarget = $controls['BtnLang']
+    $cm.Placement = "Bottom"
+    $cm.IsOpen = $true
+})
+foreach ( $mi in @($controls['BtnLang'].ContextMenu.Items) ) {
+    $mi.Add_Click({
+        param($s, $e)
+        $tag = ""
+        try { $tag = [string]$e.OriginalSource.Tag } catch { }
+        if ( $tag -eq "" ) { try { $tag = [string]$s.Tag } catch { } }
+        if ( $tag -eq "en" -or $tag -eq "ru" ) {
+            $script:PendingLang = $tag
+            $window.Dispatcher.BeginInvoke([Action]{ Set-Lang $script:PendingLang }) | Out-Null
+        }
+    })
+}
+
+# ---------- settings: тема + язык переживают перезапуск панели ----------
+$script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
+function Save-Settings {
+    try {
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang } |
+            ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
+    } catch { }
+}
+$script:StartTheme = "dark"
+$script:StartLang = "en"
+try {
+    $s = Get-Content $script:SettingsFile -Raw -ErrorAction Stop | ConvertFrom-Json
+    if ( $s.theme -eq "light" ) { $script:StartTheme = "light" }
+    if ( $s.lang -eq "ru" ) { $script:StartLang = "ru" }
+} catch { }
+Set-Theme ($script:StartTheme -eq "dark")
+Set-Lang $script:StartLang
 
 # ---------- owl icon ----------
 $owlPath = Join-Path $PSScriptRoot "owl.png"
