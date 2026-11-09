@@ -481,8 +481,8 @@ $controls['BtnPathPlay'].Add_Click({ Do-PathPlay })
 $controls['BtnPathStop'].Add_Click({ Set-Status (Send-GameCommand "PathStop") })
 $controls['BtnPathList'].Add_Click({ Set-Status (Send-GameCommand "PathList") })
 $controls['BtnPathClear'].Add_Click({
-    Set-Status (Send-GameCommand "PathClear")
-    Track-ClearKeys
+    $st = Send-GameCommand "PathClear"
+    Sync-AfterCommand $st
 })
 $controls['BtnRefresh'].Add_Click({ Sync-FromLog })
 $controls['BtnGoto'].Add_Click({
