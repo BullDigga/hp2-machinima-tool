@@ -276,6 +276,10 @@ function Focus-GameWindow([IntPtr]$h) {
 
 function Send-GameCommands([string[]]$cmds) {
     Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
+    # v5.12: после команды ждём новое событие; если быстрый скан его не увидел
+    # (хвост буфера лога уехал из кэшированных областей) - Complete запустит полный рескан
+    $script:PendingFullSync = $true
+    $script:FullRetryDone = $false
     $h = Find-GameWindow
     if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
     if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
@@ -352,6 +356,9 @@ function Refresh-Table {
     $n = 0
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
     if ( $n -eq 0 ) {
+        # v5.12: кадров нет - метка карты смысла не имеет, сбрасываем
+        $script:CurrentMap = ""
+        $controls['TbMap'].Text = Get-MapText
         Set-Status "table: 0 keyframes - press F8 in game to add"
     } else {
         Set-Status "table: $n keyframes (ini synced)"
@@ -361,6 +368,8 @@ function Refresh-Table {
 $script:SyncBusy = $false
 $script:SyncForce = $false
 $script:LastScanFast = $false
+$script:PendingFullSync = $false
+$script:FullRetryDone = $false
 
 function Sync-FromLog([switch]$Force) {
     # v5.8: асинхронно - скан памяти в C#-потоке, UI и крутящийся ⟳ живут.
@@ -402,6 +411,13 @@ function Complete-SyncFromLog {
     # Инвалидировать кэш и выйти, НЕ трогая таблицу (иначе она опустошается).
     if ( $txt -eq "" -and $script:LastScanFast ) {
         $script:ScanCache.Regions = @()
+        # v5.12: после команды событие ОБЯЗАНО прийти - делаем один полный рескан
+        if ( $script:PendingFullSync -and -not $script:FullRetryDone ) {
+            $script:FullRetryDone = $true
+            $script:PendingFullSync = $false
+            Sync-FromLog -Force
+            return
+        }
         return
     }
     if ( $txt -ne "" ) {
@@ -560,6 +576,9 @@ function Complete-SyncFromLog {
         Refresh-Table
         Update-SelectionButtons
         Set-Status "table: $($rows.Count) keys (memory scan OK)"
+        # полный скан отработал с данными - флаги ретрая сброшены
+        $script:PendingFullSync = $false
+        $script:FullRetryDone = $false
     }
 }
 
@@ -735,30 +754,34 @@ function Send-PathSaveAndSync([string]$prefix) {
           <ContextMenu>
             <MenuItem Header="English" Tag="en">
               <MenuItem.Icon>
-                <Border CornerRadius="3" Width="22" Height="15" ClipToBounds="True">
-                  <Canvas Width="22" Height="15">
-                    <Rectangle Width="22" Height="15" Fill="#012169"/>
-                    <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="White" StrokeThickness="3.6"/>
-                    <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="White" StrokeThickness="3.6"/>
-                    <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
-                    <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
-                    <Rectangle Width="22" Height="5.4" Canvas.Top="4.8" Fill="White"/>
-                    <Rectangle Width="5.4" Height="15" Canvas.Left="8.3" Fill="White"/>
-                    <Rectangle Width="22" Height="3.2" Canvas.Top="5.9" Fill="#C8102E"/>
-                    <Rectangle Width="3.2" Height="15" Canvas.Left="9.4" Fill="#C8102E"/>
-                  </Canvas>
-                </Border>
+                <Viewbox Width="19" Height="13">
+                  <Border CornerRadius="2" Width="22" Height="15" ClipToBounds="True">
+                    <Canvas Width="22" Height="15">
+                      <Rectangle Width="22" Height="15" Fill="#012169"/>
+                      <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+                      <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+                      <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+                      <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+                      <Rectangle Width="22" Height="5.4" Canvas.Top="4.8" Fill="White"/>
+                      <Rectangle Width="5.4" Height="15" Canvas.Left="8.3" Fill="White"/>
+                      <Rectangle Width="22" Height="3.2" Canvas.Top="5.9" Fill="#C8102E"/>
+                      <Rectangle Width="3.2" Height="15" Canvas.Left="9.4" Fill="#C8102E"/>
+                    </Canvas>
+                  </Border>
+                </Viewbox>
               </MenuItem.Icon>
             </MenuItem>
             <MenuItem Header="Русский" Tag="ru">
               <MenuItem.Icon>
-                <Border CornerRadius="3" Width="22" Height="15" ClipToBounds="True">
-                  <Canvas Width="22" Height="15">
-                    <Rectangle Width="22" Height="5" Fill="White" Stroke="#B0B7C3" StrokeThickness="0.6"/>
-                    <Rectangle Canvas.Top="5" Width="22" Height="5" Fill="#0039A6"/>
-                    <Rectangle Canvas.Top="10" Width="22" Height="5" Fill="#D52B1E"/>
-                  </Canvas>
-                </Border>
+                <Viewbox Width="19" Height="13">
+                  <Border CornerRadius="2" Width="22" Height="15" ClipToBounds="True">
+                    <Canvas Width="22" Height="15">
+                      <Rectangle Width="22" Height="5" Fill="White" Stroke="#B0B7C3" StrokeThickness="0.6"/>
+                      <Rectangle Canvas.Top="5" Width="22" Height="5" Fill="#0039A6"/>
+                      <Rectangle Canvas.Top="10" Width="22" Height="5" Fill="#D52B1E"/>
+                    </Canvas>
+                  </Border>
+                </Viewbox>
               </MenuItem.Icon>
             </MenuItem>
           </ContextMenu>
@@ -965,6 +988,7 @@ $script:PlayWatch = $null
 function Set-Playing([bool]$p) {
     $script:Playing = $p
     $controls['BtnPathStop'].IsEnabled = $p
+    Update-SelectionButtons   # v5.12: лочка кнопок на время воспроизведения
     if ( $p ) {
         $controls['BtnPathStop'].Background = "#E5484D"
         $controls['BtnPathStop'].Foreground = "White"
@@ -1288,14 +1312,28 @@ $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 # ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
 $script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
+# v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
+# секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
+$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnInsert','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 function Update-SelectionButtons {
+    $play = [bool]$script:Playing
+    foreach ( $b in $script:PlayLock ) {
+        try { $controls[$b].IsEnabled = (-not $play) } catch { }
+    }
+    if ( $play ) {
+        $controls['BtnExport'].IsEnabled = $true
+        $controls['BtnPathStop'].IsEnabled = $true
+        $controls['BtnPathPlay'].IsEnabled = $true
+        $controls['BtnPathPlaySpeed'].IsEnabled = $true
+        return
+    }
     $has = $controls['DgKeys'].SelectedItem -ne $null
     foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
     $n = 0
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
     foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
     $controls['BtnPathClear'].IsEnabled = ($n -gt 0)
-    $controls['BtnPathStop'].IsEnabled = [bool]$script:Playing
+    $controls['BtnPathStop'].IsEnabled = $false
     $L = $null
     if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
     if ( $L -ne $null ) {
@@ -1312,23 +1350,36 @@ Update-SelectionButtons
 
 # ---------- v5.11: крутящийся ⟳ (плавная WPF-анимация) + таймер завершения скана ----------
 function Start-Spin {
+    # v5.12: DoubleAnimation с ПОЛНЫМИ именами типов (New-Object "Windows.X" в PS5.1
+    # не находит тип - префикс System. подставляют только тип-литералы; catch глотал).
     try {
-        $anim = New-Object Windows.Media.Animation.DoubleAnimation
+        $anim = [System.Windows.Media.Animation.DoubleAnimation]::new()
         $anim.From = 0
         $anim.To = 360
-        $anim.Duration = New-Object Windows.Duration ([TimeSpan]::FromSeconds(1.1))
-        $anim.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
-        $controls['RefreshRot'].BeginAnimation([Windows.Media.Animation.RotateTransform]::AngleProperty, $anim)
+        $anim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(1.1))
+        $anim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $controls['RefreshRot'].BeginAnimation([System.Windows.Media.Animation.RotateTransform]::AngleProperty, $anim)
     } catch { }
+    $script:SpinManual = $true
 }
 function Stop-Spin {
     try {
-        $controls['RefreshRot'].BeginAnimation([Windows.Media.Animation.RotateTransform]::AngleProperty, $null)
+        $controls['RefreshRot'].BeginAnimation([System.Windows.Media.Animation.RotateTransform]::AngleProperty, $null)
     } catch { }
+    $controls['RefreshRot'].Angle = 0
+    $script:SpinManual = $false
 }
+$script:SpinManual = $false
+$script:SpinAngle = 0
 $script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
 $script:UiTimer.Add_Tick({
+    # резервное вращение вручную: пока идёт синк - доворачиваем на шаг за тик.
+    # Если WPF-анимация активна, прямая запись Angle перекрывается ею - не мешает.
+    if ( $script:SyncBusy -and $script:SpinManual ) {
+        $script:SpinAngle = ($script:SpinAngle + 27) % 360
+        $controls['RefreshRot'].Angle = $script:SpinAngle
+    }
     if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
 })
 $script:UiTimer.Start()
