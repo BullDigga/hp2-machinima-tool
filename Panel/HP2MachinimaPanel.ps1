@@ -283,7 +283,11 @@ function Send-GameCommands([string[]]$cmds) {
     $h = Find-GameWindow
     if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
     if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
+    # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
+    # Обычный ` остаётся терминалом пользователя.
+    [GameCtl]::KeyDown([uint16]0x10)
     [GameCtl]::Tap([uint16]$VK['grave'])
+    [GameCtl]::KeyUp([uint16]0x10)
     Start-Sleep -Milliseconds 120
     foreach ($c in $cmds) {
         Type-Command $c
@@ -633,6 +637,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="DirtyBrush" Color="#FF3A3F4D"/>
     <SolidColorBrush x:Key="NavBrush" Color="#FF89DCEB"/>
     <SolidColorBrush x:Key="HdrBrush" Color="#FF313244"/>
+    <SolidColorBrush x:Key="SelBrush" Color="#FF3D4A66"/>
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
 
     <Style TargetType="Button">
@@ -704,6 +709,25 @@ function Send-PathSaveAndSync([string]$prefix) {
           </ControlTemplate>
         </Setter.Value>
       </Setter>
+    </Style>
+    <!-- v5.13: спокойная подсветка выбранной строки вместо дефолтного ярко-синего -->
+    <Style TargetType="DataGridCell" BasedOn="{StaticResource {x:Type DataGridCell}}">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="{DynamicResource SelBrush}"/>
+          <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="{DynamicResource SelBrush}"/>
+        </Trigger>
+      </Style.Triggers>
     </Style>
   </Window.Resources>
   <Grid Margin="12">
@@ -930,11 +954,7 @@ function Send-PathSaveAndSync([string]$prefix) {
               HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,16,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
               BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)" ToolTipService.ShowOnDisabled="True">
-        <TextBlock Text="⟳" RenderTransformOrigin="0.5,0.5">
-          <TextBlock.RenderTransform>
-            <RotateTransform x:Name="RefreshRot" Angle="0"/>
-          </TextBlock.RenderTransform>
-        </TextBlock>
+        <TextBlock Text="⟳"/>
       </Button>
       <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
@@ -1006,7 +1026,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','RefreshRot','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1397,23 +1417,29 @@ Update-SelectionButtons
 
 # ---------- v5.11: крутящийся ⟳ (плавная WPF-анимация) + таймер завершения скана ----------
 function Start-Spin {
-    # v5.12: DoubleAnimation с ПОЛНЫМИ именами типов (New-Object "Windows.X" в PS5.1
-    # не находит тип - префикс System. подставляют только тип-литералы; catch глотал).
+    # v5.13: анимация на живом unfrozen-трансформе ($script:SpinTransform, создан в коде)
     try {
-        $anim = [System.Windows.Media.Animation.DoubleAnimation]::new()
-        $anim.From = 0
-        $anim.To = 360
-        $anim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(1.1))
-        $anim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-        $controls['RefreshRot'].BeginAnimation([System.Windows.Media.Animation.RotateTransform]::AngleProperty, $anim)
-    } catch { }
-    $script:SpinManual = $true
+        if ( $script:SpinTransform -ne $null ) {
+            $anim = [System.Windows.Media.Animation.DoubleAnimation]::new()
+            $anim.From = 0
+            $anim.To = 360
+            $anim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(1.1))
+            $anim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+            $script:SpinTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $anim)
+            # страховка: если анимация не завелась - тикает ручной fallback в UiTimer
+            $script:SpinManual = (-not $script:SpinTransform.HasAnimatedProperties)
+        } else {
+            $script:SpinManual = $true
+        }
+    } catch { $script:SpinManual = $true }
 }
 function Stop-Spin {
     try {
-        $controls['RefreshRot'].BeginAnimation([System.Windows.Media.Animation.RotateTransform]::AngleProperty, $null)
+        if ( $script:SpinTransform -ne $null ) {
+            $script:SpinTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+            $script:SpinTransform.Angle = 0
+        }
     } catch { }
-    $controls['RefreshRot'].Angle = 0
     $script:SpinManual = $false
 }
 $script:SpinManual = $false
@@ -1421,11 +1447,10 @@ $script:SpinAngle = 0
 $script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
 $script:UiTimer.Add_Tick({
-    # резервное вращение вручную: пока идёт синк - доворачиваем на шаг за тик.
-    # Если WPF-анимация активна, прямая запись Angle перекрывается ею - не мешает.
-    if ( $script:SyncBusy -and $script:SpinManual ) {
+    # резервное вращение вручную (если анимация не завелась): пока идёт синк - шаг за тик
+    if ( $script:SyncBusy -and $script:SpinManual -and $script:SpinTransform -ne $null ) {
         $script:SpinAngle = ($script:SpinAngle + 27) % 360
-        $controls['RefreshRot'].Angle = $script:SpinAngle
+        $script:SpinTransform.Angle = $script:SpinAngle
     }
     if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
 })
@@ -1549,12 +1574,17 @@ Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
 
 # ---------- owl icon ----------
-# v5.11: стрелка обновления - глиф "Refresh" из Segoe MDL2 (аккуратная круговая стрелка)
+# v5.13: стрелка обновления - глиф "Refresh" из Segoe MDL2 + СВЕЖИЙ unfrozen-трансформ.
+# XAML-трансформ от XamlReader заморожен - BeginAnimation на нём бросал исключение
+# (catch глотал), поэтому анимация не стартовала и крутился только ручной fallback.
 try {
     $tbR = $controls['BtnRefresh'].Content
     $tbR.FontFamily = New-Object Windows.Media.FontFamily("Segoe MDL2 Assets")
     $tbR.Text = [char]::ConvertFromUtf32(0xE72C)
     $tbR.FontSize = 16
+    $script:SpinTransform = [System.Windows.Media.RotateTransform]::new()
+    $tbR.RenderTransform = $script:SpinTransform
+    $tbR.RenderTransformOrigin = [System.Windows.Point]::new(0.5, 0.5)
 } catch { }
 $owlPath = Join-Path $PSScriptRoot "owl.png"
 if ( Test-Path $owlPath ) {
