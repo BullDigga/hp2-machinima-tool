@@ -466,7 +466,7 @@ function Sync-FromLog([switch]$Force) {
         if ( $gpNow -ne $null ) { $pfx = [string]$gpNow.Id }
         $stampChanged = $false
         foreach ( $r in $rows ) {
-            $sk = "$pfx:$($r.Seq)"
+            $sk = "${pfx}:$($r.Seq)"
             if ( -not $script:SeenSeqs.ContainsKey($sk) ) {
                 if ( $script:StampNextSync ) {
                     $script:KeyTimes[$sk] = $now
