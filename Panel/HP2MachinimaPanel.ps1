@@ -238,6 +238,31 @@ function Send-GameCommand([string]$cmd) {
     return "$cmd  OK  " + (Get-Date -Format HH:mm:ss)
 }
 
+# несколько команд за ОДНУ сессию консоли (быстро: одно открытие/закрытие)
+function Send-GameCommands([string[]]$cmds) {
+    $h = Find-GameWindow
+    if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
+    $fg = [GameCtl]::GetForegroundWindow()
+    if ($fg -ne $h) {
+        [GameCtl]::ShowWindow($h, 9) | Out-Null
+        [GameCtl]::Tap(0x12) | Out-Null
+        [GameCtl]::SetForegroundWindow($h) | Out-Null
+        Start-Sleep -Milliseconds 180
+        $fg2 = [GameCtl]::GetForegroundWindow()
+        if ($fg2 -ne $h) { return "could not focus the game - click the game window once" }
+    }
+    [GameCtl]::Tap([uint16]$VK['grave'])
+    Start-Sleep -Milliseconds 120
+    foreach ($c in $cmds) {
+        Type-Command $c
+        [GameCtl]::Tap([uint16]$VK['enter'])
+        Start-Sleep -Milliseconds 150
+    }
+    [GameCtl]::Tap([uint16]$VK['grave'])
+    Start-Sleep -Milliseconds 80
+    return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
+}
+
 # ---------- keyframe table: источник истины = лог игры ----------
 # v4.3: ini-канал мёртв (SaveConfig молчит в M212 даже из HPConsole). Вместо него:
 # игра запускается через 'Start Game with Log.bat' (-log) и движок пишет лог-файл;
@@ -377,11 +402,23 @@ function Send-PathSaveAndSync([string]$prefix) {
         Title="HP2 Machinima Panel" Width="560" SizeToContent="Height"
         Topmost="True" Background="#1E1E2E" WindowStyle="ToolWindow"
         ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60">
+  <Window.Resources>
+    <Style TargetType="{x:Type DataGridColumnHeader}">
+      <Setter Property="Background" Value="#313244"/>
+      <Setter Property="Foreground" Value="#CDD6F4"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="Padding" Value="4,3"/>
+      <Setter Property="BorderBrush" Value="#585B70"/>
+      <Setter Property="BorderThickness" Value="0,0,1,1"/>
+    </Style>
+  </Window.Resources>
   <StackPanel Margin="10">
     <TextBlock Text="HP2 MACHINIMA PANEL" Foreground="#CDD6F4" FontSize="14" FontWeight="Bold"
                HorizontalAlignment="Center" Margin="0,0,0,2"/>
     <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 Clear" Foreground="#F9E2AF"
-               FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+               FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,2"/>
+    <CheckBox Name="CbTransparent" Content="Transparent panel (see game behind)" Foreground="#A6ADC8"
+              FontSize="11" HorizontalAlignment="Center" Margin="0,0,0,6"/>
     <UniformGrid Columns="3" Margin="0,0,0,4">
       <Button Name="BtnHideHud" Content="HideHud" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnCam9" Content="Cam_Mode 9" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
@@ -434,6 +471,8 @@ function Send-PathSaveAndSync([string]$prefix) {
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="2,0" Background="#F5C97B" Foreground="#1E1E2E"/>
     </UniformGrid>
+    <Button Name="BtnSpeedAll" Content="Speed -> ALL keyframes (value from box above)" Height="30" Margin="0,2,0,4"
+            Background="#FAE3B0" Foreground="#1E1E2E" FontWeight="Bold"/>
     <TextBlock Name="TbStatus" Text="ready" Foreground="#94E2D5" FontSize="11" Margin="2,2,0,0" TextWrapping="Wrap"/>
   </StackPanel>
 </Window>
@@ -443,7 +482,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -452,7 +491,10 @@ function Set-Status([string]$s) {
 }
 
 function Do-PathAdd {
-    $st = Send-GameCommand "PathAdd"
+    # скорость кадра = поле fly speed: применяем её перед добавлением
+    $sp = $controls['TbSpeed'].Text.Trim()
+    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
+    $st = Send-GameCommands @("Cam_MoveSpeed $sp", "PathAdd")
     Sync-AfterCommand $st
 }
 function Do-PathPlay {
@@ -511,6 +553,19 @@ $controls['BtnKeySpeed'].Add_Click({
         Send-PathSaveAndSync $st
     } else { Set-Status "select a keyframe row first" }
 })
+# применить скорость из бокса ко ВСЕМ кадрам: пачка PathSetKeySpeed за одну сессию консоли
+$controls['BtnSpeedAll'].Add_Click({
+    $sp = $controls['TbSpeed'].Text.Trim()
+    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
+    if ( $script:KeyRows.Count -eq 0 ) { Set-Status "no keyframes"; return }
+    $cmds = @()
+    for ( $i = 0; $i -lt $script:KeyRows.Count; $i++ ) { $cmds += "PathSetKeySpeed $i $sp" }
+    $st = Send-GameCommands $cmds
+    Sync-AfterCommand $st
+})
+# прозрачность панели
+$controls['CbTransparent'].Add_Checked({   $window.Opacity = 0.55; Set-Status "panel transparent (55%)" })
+$controls['CbTransparent'].Add_Unchecked({ $window.Opacity = 1.0 })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
 $controls['DgKeys'].Add_CellEditEnding({
     param($sender, $e)
