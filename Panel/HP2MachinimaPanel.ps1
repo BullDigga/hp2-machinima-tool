@@ -532,6 +532,7 @@ function Complete-SyncFromLog {
 
     $script:KeyRows = $rows
     Refresh-Table
+    Update-SelectionButtons
     Set-Status "table: $($rows.Count) keys (memory scan OK)"
 }
 
@@ -747,7 +748,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <ColumnDefinition Width="Auto"/>
               </Grid.ColumnDefinitions>
               <Button Name="BtnPathPlay" Content="▶  PLAY (by TIME)" Background="Transparent" BorderThickness="0"
-                      Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand"/>
+                      Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand" ToolTipService.ShowOnDisabled="True"/>
               <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,4,0">
                 <TextBox Name="TbSeconds" Text="15" Width="62" Height="32" FontSize="16" FontWeight="Bold"
                          Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
@@ -758,9 +759,9 @@ function Send-PathSaveAndSync([string]$prefix) {
           </Grid>
         </Border>
         <Button Name="BtnPathPlaySpeed" Grid.Row="1" Content="▶  PLAY (by keyframe SPEEDS)" Background="#CBA6F7"
-                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"/>
+                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" ToolTipService.ShowOnDisabled="True"/>
       </Grid>
-      <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
     </Grid>
 
     <!-- clear -->
@@ -773,7 +774,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="5*"/>
         <ColumnDefinition Width="1.5*"/>
       </Grid.ColumnDefinitions>
-      <DataGrid Name="DgKeys" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
+      <DataGrid Name="DgKeys" Margin="0,0,6,0" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
@@ -818,7 +819,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
                    TextWrapping="Wrap" Margin="2,0,0,10"/>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
-                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
         <Button Name="BtnImport" Content="↙  Import from file" Height="34"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       </StackPanel>
@@ -848,13 +849,13 @@ function Send-PathSaveAndSync([string]$prefix) {
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Grid.Row="0" Grid.Column="2" Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,4" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
       <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
-      <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
       <TextBlock Grid.Row="1" Grid.Column="0" Name="TxFlySpeed" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
       <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="500" Width="56" Height="30" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
       <Button Grid.Row="1" Grid.Column="3" Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
-      <Button Grid.Row="1" Grid.Column="4" Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Grid.Row="1" Grid.Column="4" Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
     </Grid>
 
     <!-- status + transparency -->
@@ -905,6 +906,7 @@ $script:Playing = $false
 $script:PlayWatch = $null
 function Set-Playing([bool]$p) {
     $script:Playing = $p
+    $controls['BtnPathStop'].IsEnabled = $p
     if ( $p ) {
         $controls['BtnPathStop'].Background = "#E5484D"
         $controls['BtnPathStop'].Foreground = "White"
@@ -949,12 +951,24 @@ function Get-PathTotalDur {
     return $tot
 }
 function Do-PathPlay {
+    # один кадр = просто перейти к нему (игра требует минимум 2 для проигрывания)
+    if ( $script:KeyRows.Count -eq 1 ) {
+        $st = Send-GameCommand "PathGoto 0"
+        Set-Status ($script:LocData[$script:Lang].OneKey + " | " + $st)
+        return
+    }
     # speed-driven playback: длительность сегментов = дистанция / скорость кадра
     $st = Send-GameCommand "PathPlaySpeed"
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback (Get-PathTotalDur) }
     Set-Status $st
 }
 function Do-PathPlayTime {
+    # один кадр = просто перейти к нему
+    if ( $script:KeyRows.Count -eq 1 ) {
+        $st = Send-GameCommand "PathGoto 0"
+        Set-Status ($script:LocData[$script:Lang].OneKey + " | " + $st)
+        return
+    }
     # равномерный режим: весь путь за N секунд из поля FLIGHT TIME
     $sec = $controls['TbSeconds'].Text.Trim()
     if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
@@ -1211,11 +1225,24 @@ function Set-Theme([bool]$dark) {
 }
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
-# ---------- v5.8: кнопки, требующие выбранный кадр ----------
+# ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
 $script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto')
+$script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 function Update-SelectionButtons {
     $has = $controls['DgKeys'].SelectedItem -ne $null
     foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
+    $n = 0
+    if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
+    foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
+    $controls['BtnPathStop'].IsEnabled = [bool]$script:Playing
+    $L = $null
+    if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
+    if ( $L -ne $null ) {
+        foreach ( $b in $script:KeysDep ) {
+            $controls[$b].ToolTip = if ( $n -gt 0 ) { $null } else { $L.TipNeedKeys }
+        }
+        $controls['BtnPathStop'].ToolTip = $L.TipStop
+    }
 }
 $controls['DgKeys'].Add_SelectionChanged({ Update-SelectionButtons })
 Update-SelectionButtons
@@ -1253,6 +1280,9 @@ $script:LocData = @{
         HkFrame = "  frame"; HkPlay = "  play"; HkStop = "  stop"; HkClear = "  clear"
         TipSelect = "Select a keyframe row in the table first"
         TipEdit = "Edit the value - the button unlocks when it differs from the applied one"
+        TipNeedKeys = "Add at least one keyframe first (F8)"
+        TipStop = "Nothing is playing right now"
+        OneKey = "only 1 key - jumped to it"
     }
     ru = @{
         HudHide = "🙈  Скрыть HUD"; HudShow = "👁  Показать HUD"
@@ -1270,6 +1300,9 @@ $script:LocData = @{
         HkFrame = "  кадр"; HkPlay = "  воспроизв."; HkStop = "  стоп"; HkClear = "  очистка"
         TipSelect = "Сначала выберите кадр в таблице (клик по строке)"
         TipEdit = "Измените значение - кнопка станет активной, когда оно отличается от применённого"
+        TipNeedKeys = "Сначала добавьте хотя бы один кадр (F8)"
+        TipStop = "Сейчас ничего не воспроизводится"
+        OneKey = "всего один кадр - перешли к нему"
     }
 }
 $script:Lang = "en"
