@@ -275,9 +275,10 @@ function Focus-GameWindow([IntPtr]$h) {
 }
 
 function Send-GameCommands([string[]]$cmds) {
+    Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
     $h = Find-GameWindow
-    if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
-    if ( -not (Focus-GameWindow $h) ) { return "could not focus the game - click the game window once" }
+    if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
+    if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
     [GameCtl]::Tap([uint16]$VK['grave'])
     Start-Sleep -Milliseconds 120
     foreach ($c in $cmds) {
@@ -287,6 +288,14 @@ function Send-GameCommands([string[]]$cmds) {
     }
     [GameCtl]::Tap([uint16]$VK['grave'])
     Start-Sleep -Milliseconds 80
+    # одиночные команды без последующего синка: гасим спиннер сами (синк делает это раньше, если запущен)
+    $script:SpinStopTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:SpinStopTimer.Interval = [TimeSpan]::FromMilliseconds(1400)
+    $script:SpinStopTimer.Add_Tick({
+        $script:SpinStopTimer.Stop()
+        if ( -not $script:SyncBusy ) { Stop-Spin }
+    })
+    $script:SpinStopTimer.Start()
     return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
 }
 
@@ -339,6 +348,7 @@ function Read-SavedPathData {
 function Refresh-Table {
     # строки уже собраны в $script:KeyRows
     $controls['DgKeys'].ItemsSource = $script:KeyRows
+    Update-SelectionButtons   # v5.11: серые кнопки (в т.ч. корзина) синхронно с таблицей
     $n = 0
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
     if ( $n -eq 0 ) {
@@ -364,12 +374,13 @@ function Sync-FromLog([switch]$Force) {
         } catch { }
     }
     $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ( $gp -eq $null ) { Set-Status "no keyframe source - is the game running?"; return }
+    if ( $gp -eq $null ) { Stop-Spin; Set-Status "no keyframe source - is the game running?"; return }
     $pairs = $null
     if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) { $pairs = [long[]]$script:ScanCache.Regions }
     $script:LastScanFast = ($pairs -ne $null)
     $script:SyncBusy = $true
     $script:SyncForce = [bool]$Force
+    Start-Spin
     [MemScanPanel]::StartAsync($gp.Id, $pairs)
 }
 
@@ -377,6 +388,7 @@ function Complete-SyncFromLog {
     param([string]$txtOverride = "")
     $script:SyncBusy = $false
     [MemScanPanel]::AsyncState = 0
+    Stop-Spin
     $rows = New-Object System.Collections.ArrayList
     $txt = $txtOverride
     if ( $txtOverride -eq "" ) {
@@ -607,12 +619,15 @@ function Send-PathSaveAndSync([string]$prefix) {
     <Style TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="BorderThickness" Value="0,0,0,1"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="Padding" Value="6,4"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border CornerRadius="8" Background="{TemplateBinding Background}"
                     BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,4"/>
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
@@ -718,8 +733,34 @@ function Send-PathSaveAndSync([string]$prefix) {
         </Grid>
         <Button.ContextMenu>
           <ContextMenu>
-            <MenuItem Header="🇬🇧 English" Tag="en"/>
-            <MenuItem Header="🇷🇺 Русский" Tag="ru"/>
+            <MenuItem Header="English" Tag="en">
+              <MenuItem.Icon>
+                <Border CornerRadius="3" Width="22" Height="15" ClipToBounds="True">
+                  <Canvas Width="22" Height="15">
+                    <Rectangle Width="22" Height="15" Fill="#012169"/>
+                    <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+                    <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="White" StrokeThickness="3.6"/>
+                    <Line X1="0" Y1="0" X2="22" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+                    <Line X1="22" Y1="0" X2="0" Y2="15" Stroke="#C8102E" StrokeThickness="1.4"/>
+                    <Rectangle Width="22" Height="5.4" Canvas.Top="4.8" Fill="White"/>
+                    <Rectangle Width="5.4" Height="15" Canvas.Left="8.3" Fill="White"/>
+                    <Rectangle Width="22" Height="3.2" Canvas.Top="5.9" Fill="#C8102E"/>
+                    <Rectangle Width="3.2" Height="15" Canvas.Left="9.4" Fill="#C8102E"/>
+                  </Canvas>
+                </Border>
+              </MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="Русский" Tag="ru">
+              <MenuItem.Icon>
+                <Border CornerRadius="3" Width="22" Height="15" ClipToBounds="True">
+                  <Canvas Width="22" Height="15">
+                    <Rectangle Width="22" Height="5" Fill="White" Stroke="#B0B7C3" StrokeThickness="0.6"/>
+                    <Rectangle Canvas.Top="5" Width="22" Height="5" Fill="#0039A6"/>
+                    <Rectangle Canvas.Top="10" Width="22" Height="5" Fill="#D52B1E"/>
+                  </Canvas>
+                </Border>
+              </MenuItem.Icon>
+            </MenuItem>
           </ContextMenu>
         </Button.ContextMenu>
       </Button>
@@ -761,7 +802,8 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <ColumnDefinition Width="Auto"/>
               </Grid.ColumnDefinitions>
               <Button Name="BtnPathPlay" Content="▶  PLAY (by TIME)" Background="Transparent" BorderThickness="0"
-                      Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand" ToolTipService.ShowOnDisabled="True"/>
+                      Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand"
+                      HorizontalContentAlignment="Left" Padding="18,4" ToolTipService.ShowOnDisabled="True"/>
               <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,4,0">
                 <TextBox Name="TbSeconds" Text="15" Width="62" Height="32" FontSize="16" FontWeight="Bold"
                          Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
@@ -772,7 +814,8 @@ function Send-PathSaveAndSync([string]$prefix) {
           </Grid>
         </Border>
         <Button Name="BtnPathPlaySpeed" Grid.Row="1" Content="▶  PLAY (by keyframe SPEEDS)" Background="#CBA6F7"
-                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" ToolTipService.ShowOnDisabled="True"/>
+                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Left" Padding="18,4" ToolTipService.ShowOnDisabled="True"/>
       </Grid>
       <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
     </Grid>
@@ -813,8 +856,8 @@ function Send-PathSaveAndSync([string]$prefix) {
         </DataGridTemplateColumn>
       </DataGrid.Columns>
     </DataGrid>
-      <Button Name="BtnRefresh" Width="34" Height="34" FontSize="19" FontWeight="Bold"
-              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,8,8"
+      <Button Name="BtnRefresh" Width="34" Height="34" FontSize="17" FontWeight="Bold"
+              HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,16,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
               BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)">
         <TextBlock Text="⟳" RenderTransformOrigin="0.5,0.5">
@@ -832,15 +875,17 @@ function Send-PathSaveAndSync([string]$prefix) {
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
                    TextWrapping="Wrap" Margin="2,0,0,10"/>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
-                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                HorizontalContentAlignment="Left" Padding="14,4" ToolTipService.ShowOnDisabled="True"/>
         <Button Name="BtnImport" Content="↙  Import from file" Height="34"
-                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                HorizontalContentAlignment="Left" Padding="14,4"/>
       </StackPanel>
     </Grid>
 
     <!-- table actions -->
     <UniformGrid Grid.Row="8" Columns="2" Margin="3,0,3,6">
-      <Button Name="BtnInsert" Content="➕  Insert after selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
+      <Button Name="BtnInsert" Content="➕  Add keyframe after selected key" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
       <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}" ToolTipService.ShowOnDisabled="True"/>
     </UniformGrid>
 
@@ -1265,15 +1310,25 @@ Update-SelectionButtons
 
 # ---------- v5.8: ресайз окна за кромки - WindowChrome (ResizeBorderThickness=10) ----------
 
-# ---------- v5.8: таймер UI: крутящийся ⟳ + завершение фонового скана ----------
-$script:SpinAngle = 0
+# ---------- v5.11: крутящийся ⟳ (плавная WPF-анимация) + таймер завершения скана ----------
+function Start-Spin {
+    try {
+        $anim = New-Object Windows.Media.Animation.DoubleAnimation
+        $anim.From = 0
+        $anim.To = 360
+        $anim.Duration = New-Object Windows.Duration ([TimeSpan]::FromSeconds(1.1))
+        $anim.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+        $controls['RefreshRot'].BeginAnimation([Windows.Media.Animation.RotateTransform]::AngleProperty, $anim)
+    } catch { }
+}
+function Stop-Spin {
+    try {
+        $controls['RefreshRot'].BeginAnimation([Windows.Media.Animation.RotateTransform]::AngleProperty, $null)
+    } catch { }
+}
 $script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
 $script:UiTimer.Add_Tick({
-    if ( $script:SyncBusy ) {
-        $script:SpinAngle = ($script:SpinAngle + 30) % 360
-        $controls['RefreshRot'].Angle = $script:SpinAngle
-    }
     if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
 })
 $script:UiTimer.Start()
@@ -1288,7 +1343,7 @@ $script:LocData = @{
         Keyframes = "▦ KEYFRAMES (double-click = go to key)"
         NoMap = "(no map)"; Map = "🗺 MAP"
         Export = "↗  Export to file"; Import = "↙  Import from file"
-        Insert = "➕  Insert after selected key"; Goto = "📍  Go to selected key"
+        Insert = "➕  Add keyframe after selected key"; Goto = "📍  Go to selected key"
         Fov = "📷 FOV"; FlySpeed = "✈ Fly speed"
         SetFov = "Set FOV"; FovKey = "🎯 FOV → key"; FovAll = "🌐 FOV → ALL"
         SetSpeed = "Set fly speed"; SpeedKey = "⚡ Speed → key"; SpeedAll = "🗂 Speed → ALL"
@@ -1308,7 +1363,7 @@ $script:LocData = @{
         Keyframes = "▦ КАДРЫ (двойной клик = перейти к кадру)"
         NoMap = "(нет карты)"; Map = "🗺 КАРТА"
         Export = "↗  Экспорт в файл"; Import = "↙  Импорт из файла"
-        Insert = "➕  Вставить после выбранного кадра"; Goto = "📍  Перейти к выбранному кадру"
+        Insert = "➕  Добавить кадр после выбранного"; Goto = "📍  Перейти к выбранному кадру"
         Fov = "📷 FOV"; FlySpeed = "✈ Скорость полёта"
         SetFov = "Задать FOV"; FovKey = "🎯 FOV → кадр"; FovAll = "🌐 FOV → ВСЕ"
         SetSpeed = "Задать скорость"; SpeedKey = "⚡ Скор. → кадр"; SpeedAll = "🗂 Скор. → ВСЕ"
@@ -1396,6 +1451,13 @@ Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
 
 # ---------- owl icon ----------
+# v5.11: стрелка обновления - глиф "Refresh" из Segoe MDL2 (аккуратная круговая стрелка)
+try {
+    $tbR = $controls['BtnRefresh'].Content
+    $tbR.FontFamily = New-Object Windows.Media.FontFamily("Segoe MDL2 Assets")
+    $tbR.Text = [char]::ConvertFromUtf32(0xE72C)
+    $tbR.FontSize = 16
+} catch { }
 $owlPath = Join-Path $PSScriptRoot "owl.png"
 if ( Test-Path $owlPath ) {
     try {
