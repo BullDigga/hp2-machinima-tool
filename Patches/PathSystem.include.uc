@@ -7,13 +7,20 @@ function PathAddKey()
 	K.vLoc = vCurrPosition;
 	K.rRot = rCurrRotation;
 	K.fFOV = PlayerHarry.FovAngle;
+	K.fSpeed = CurrentSet.fMoveSpeed;
+	if ( K.fSpeed <= 0.0 )
+	{
+		K.fSpeed = 250.0;
+	}
 	PathKeys[PathKeys.Length] = K;
+	Log("PATHADD:"$string(K.vLoc.X)$","$string(K.vLoc.Y)$","$string(K.vLoc.Z)$","$string(K.rRot.Yaw)$","$string(K.rRot.Pitch)$","$string(K.fFOV)$","$string(K.fSpeed));
 	PlayerHarry.ClientMessage("Path: key "$PathKeys.Length$" added");
 }
 
 function PathClearKeys()
 {
 	PathKeys.Remove(0, PathKeys.Length);
+	Log("PATHCLEAR");
 	PlayerHarry.ClientMessage("Path: all keys cleared");
 }
 
@@ -25,7 +32,25 @@ function PathDeleteKey(int i)
 		return;
 	}
 	PathKeys.Remove(i, 1);
+	Log("PATHDEL:"$i);
 	PlayerHarry.ClientMessage("Path: key "$i$" removed ("$PathKeys.Length$" left)");
+}
+
+function PathSetKeySpeed(int i, float s)
+{
+	if ( i < 0 || i >= PathKeys.Length )
+	{
+		PlayerHarry.ClientMessage("Path: bad index "$i$" (have "$PathKeys.Length$")");
+		return;
+	}
+	if ( s <= 0.0 )
+	{
+		PlayerHarry.ClientMessage("Path: speed must be > 0");
+		return;
+	}
+	PathKeys[i].fSpeed = s;
+	Log("PATHSPEED:"$i$","$string(s));
+	PlayerHarry.ClientMessage("Path: key "$i$" speed = "$s);
 }
 
 function PathGotoKey(int i)
@@ -79,6 +104,8 @@ function PathStopPath()
 
 function PathPlayPath(float fDuration)
 {
+	local int i;
+	local float even;
 	if ( PathKeys.Length < 2 )
 	{
 		PlayerHarry.ClientMessage("Path: need at least 2 keys (have "$PathKeys.Length$")");
@@ -88,10 +115,50 @@ function PathPlayPath(float fDuration)
 	{
 		fDuration = 10.0;
 	}
-	fPathDuration = fDuration;
+	// равномерные сегменты
+	PathSegDur.Remove(0, PathSegDur.Length);
+	even = fDuration / (PathKeys.Length - 1);
+	for ( i = 0; i < PathKeys.Length - 1; i++ )
+	{
+		PathSegDur[PathSegDur.Length] = even;
+	}
+	fTotalDur = fDuration;
 	fPathElapsed = 0.0;
 	GotoState('StatePathPlaying');
-	PlayerHarry.ClientMessage("Path: playing "$fPathDuration$"s over "$PathKeys.Length$" keys");
+	PlayerHarry.ClientMessage("Path: playing "$fTotalDur$"s over "$PathKeys.Length$" keys");
+}
+
+// проигрывание с скоростью каждого сегмента (из fSpeed кейфреймов)
+function PathPlaySpeedPath()
+{
+	local int i;
+	local float seg, sp, dur;
+	if ( PathKeys.Length < 2 )
+	{
+		PlayerHarry.ClientMessage("Path: need at least 2 keys (have "$PathKeys.Length$")");
+		return;
+	}
+	PathSegDur.Remove(0, PathSegDur.Length);
+	fTotalDur = 0.0;
+	for ( i = 0; i < PathKeys.Length - 1; i++ )
+	{
+		seg = VSize(PathKeys[i+1].vLoc - PathKeys[i].vLoc);
+		sp = PathKeys[i].fSpeed;
+		if ( sp <= 0.0 )
+		{
+			sp = 250.0;
+		}
+		dur = seg / sp;
+		if ( dur < 0.05 )
+		{
+			dur = 0.05;
+		}
+		PathSegDur[PathSegDur.Length] = dur;
+		fTotalDur += dur;
+	}
+	fPathElapsed = 0.0;
+	GotoState('StatePathPlaying');
+	PlayerHarry.ClientMessage("Path: playing "$fTotalDur$"s (speed mode) over "$PathKeys.Length$" keys");
 }
 
 // --- ini persistence (config string SavedPathData) ---
@@ -194,22 +261,33 @@ state StatePathPlaying
 
 	function Tick(float fTimeDelta)
 	{
-		local float fT, fSeg, fU, fU2, fU3;
+		local float fT, fSeg, fU, fU2, fU3, fAcc;
 		local int i, i0, i3;
 		local vector vP0, vP1, vP2, vP3, vPos;
 		local rotator rRot;
 		local int dYaw, dPitch, dRoll;
 
 		fPathElapsed += fTimeDelta;
-		fT = FMin(1.0, fPathElapsed / fPathDuration);
 
-		fSeg = fT * (PathKeys.Length - 1);
-		i = int(fSeg);
-		if ( i > PathKeys.Length - 2 )
+		// найти текущий сегмент по накопленному времени (per-segment длительности)
+		fAcc = 0.0;
+		i = 0;
+		while ( i < PathSegDur.Length - 1 && fPathElapsed >= fAcc + PathSegDur[i] )
 		{
-			i = PathKeys.Length - 2;
+			fAcc += PathSegDur[i];
+			i++;
 		}
-		fU = fSeg - float(i);
+		if ( fPathElapsed >= fTotalDur )
+		{
+			// финал: встать точно на последний кадр
+			i = PathKeys.Length - 2;
+			fU = 1.0;
+		}
+		else
+		{
+			fU = (fPathElapsed - fAcc) / FMax(PathSegDur[i], 0.001);
+			fU = FMin(1.0, fU);
+		}
 
 		i0 = i - 1;
 		if ( i0 < 0 )
@@ -262,7 +340,7 @@ state StatePathPlaying
 		PlayerHarry.FovAngle = PathKeys[i].fFOV
 			+ (PathKeys[i+1].fFOV - PathKeys[i].fFOV) * fU;
 
-		if ( fT >= 1.0 )
+		if ( fPathElapsed >= fTotalDur )
 		{
 			GotoState('StateFreeCam');
 		}

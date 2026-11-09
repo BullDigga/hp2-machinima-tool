@@ -140,11 +140,14 @@ function Send-GameCommand([string]$cmd) {
 # панель считает кадры сама: F8=+1, Del=-1, Clear=0. Координаты не нужны:
 # двойной клик = PathGoto (камера прыгает к кадру - видно глазами).
 
-$script:KeyFovs = New-Object System.Collections.ArrayList   # FOV на момент добавления
+$script:KeyFovs = New-Object System.Collections.ArrayList    # FOV на момент добавления
+$script:KeySpeeds = New-Object System.Collections.ArrayList  # скорость сегмента (для PathPlaySpeed)
 
 function Refresh-Table {
     $rows = @()
     for ( $i = 0; $i -lt $script:KeyFovs.Count; $i++ ) {
+        $sp = "-"
+        if ( $i -lt $script:KeySpeeds.Count ) { $sp = $script:KeySpeeds[$i] }
         $rows += [PSCustomObject]@{
             Num = $i
             X   = "-"
@@ -153,6 +156,7 @@ function Refresh-Table {
             Yaw = "-"
             Pitch = "-"
             FOV = $script:KeyFovs[$i]
+            Speed = $sp
         }
     }
     $controls['LvKeys'].ItemsSource = $rows
@@ -166,7 +170,10 @@ function Refresh-Table {
 function Track-AddKey {
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
+    $sp = $controls['TbSpeed'].Text.Trim()
+    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     [void]$script:KeyFovs.Add($fov)
+    [void]$script:KeySpeeds.Add($sp)
     Refresh-Table
 }
 
@@ -174,11 +181,22 @@ function Track-DelKey([int]$idx) {
     if ( $idx -ge 0 -and $idx -lt $script:KeyFovs.Count ) {
         $script:KeyFovs.RemoveAt($idx)
     }
+    if ( $idx -ge 0 -and $idx -lt $script:KeySpeeds.Count ) {
+        $script:KeySpeeds.RemoveAt($idx)
+    }
     Refresh-Table
 }
 
 function Track-ClearKeys {
     $script:KeyFovs.Clear()
+    $script:KeySpeeds.Clear()
+    Refresh-Table
+}
+
+function Track-SetKeySpeed([int]$idx, [string]$val) {
+    if ( $idx -ge 0 -and $idx -lt $script:KeySpeeds.Count ) {
+        $script:KeySpeeds[$idx] = $val
+    }
     Refresh-Table
 }
 
@@ -195,9 +213,10 @@ function Track-ClearKeys {
                HorizontalAlignment="Center" Margin="0,0,0,2"/>
     <TextBlock Text="F8 AddKey  |  F9 Play  |  F10 Stop  |  F11 Clear" Foreground="#F9E2AF"
                FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,8"/>
-    <UniformGrid Columns="2" Margin="0,0,0,4">
+    <UniformGrid Columns="3" Margin="0,0,0,4">
       <Button Name="BtnHideHud" Content="HideHud" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnCam9" Content="Cam_Mode 9" Height="30" Margin="2" Background="#313244" Foreground="#CDD6F4"/>
+      <Button Name="BtnEscMenu" Content="Esc (close menu)" Height="30" Margin="2" Background="#45475A" Foreground="#CDD6F4"/>
     </UniformGrid>
     <Button Name="BtnPathAdd" Content="ADD KEYFRAME (PathAdd)" Height="42" Margin="0,2" Background="#A6E3A1" Foreground="#1E1E2E"
             FontSize="14" FontWeight="Bold"/>
@@ -219,12 +238,13 @@ function Track-ClearKeys {
       <ListView.View>
         <GridView>
           <GridViewColumn Header="#" Width="34" DisplayMemberBinding="{Binding Num}"/>
-          <GridViewColumn Header="X" Width="70" DisplayMemberBinding="{Binding X}"/>
-          <GridViewColumn Header="Y" Width="70" DisplayMemberBinding="{Binding Y}"/>
-          <GridViewColumn Header="Z" Width="70" DisplayMemberBinding="{Binding Z}"/>
-          <GridViewColumn Header="Yaw" Width="62" DisplayMemberBinding="{Binding Yaw}"/>
-          <GridViewColumn Header="Pitch" Width="56" DisplayMemberBinding="{Binding Pitch}"/>
-          <GridViewColumn Header="FOV" Width="48" DisplayMemberBinding="{Binding FOV}"/>
+          <GridViewColumn Header="X" Width="62" DisplayMemberBinding="{Binding X}"/>
+          <GridViewColumn Header="Y" Width="62" DisplayMemberBinding="{Binding Y}"/>
+          <GridViewColumn Header="Z" Width="62" DisplayMemberBinding="{Binding Z}"/>
+          <GridViewColumn Header="Yaw" Width="56" DisplayMemberBinding="{Binding Yaw}"/>
+          <GridViewColumn Header="Pitch" Width="50" DisplayMemberBinding="{Binding Pitch}"/>
+          <GridViewColumn Header="FOV" Width="44" DisplayMemberBinding="{Binding FOV}"/>
+          <GridViewColumn Header="Speed" Width="50" DisplayMemberBinding="{Binding Speed}"/>
         </GridView>
       </ListView.View>
     </ListView>
@@ -233,10 +253,11 @@ function Track-ClearKeys {
       <Button Name="BtnGoto" Content="Go to selected" Height="30" Margin="2" Background="#89DCEB" Foreground="#1E1E2E"/>
       <Button Name="BtnDel" Content="Delete selected" Height="30" Margin="2" Background="#F38BA8" Foreground="#1E1E2E"/>
     </UniformGrid>
-    <UniformGrid Columns="2" Margin="0,2,0,4">
+    <UniformGrid Columns="3" Margin="0,2,0,4">
       <TextBox Name="TbFov" Text="90" Height="30" Margin="2,0" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
       <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="2,0" Background="#CBA6F7" Foreground="#1E1E2E"/>
+      <Button Name="BtnKeySpeed" Content="Speed -> key" Height="30" Margin="2,0" Background="#CBA6F7" Foreground="#1E1E2E"/>
     </UniformGrid>
     <UniformGrid Columns="2" Margin="0,2,0,4">
       <TextBox Name="TbSpeed" Text="250" Height="30" Margin="2,0" FontSize="13"
@@ -252,7 +273,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','LvKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','TbSpeed','BtnSpeed','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','LvKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -265,13 +286,21 @@ function Do-PathAdd {
     Track-AddKey
 }
 function Do-PathPlay {
-    $sec = $controls['TbSeconds'].Text.Trim()
-    if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
-    Set-Status (Send-GameCommand "PathPlay $sec")
+    # speed-driven playback: длительность сегментов = дистанция / скорость кадра
+    Set-Status (Send-GameCommand "PathPlaySpeed")
+}
+function Send-EscKey {
+    if ( -not (Activate-Game) ) {
+        Set-Status "game window not found!"
+        return
+    }
+    [GameCtl]::Tap(0x1B)   # Escape
+    Set-Status "Esc sent to game"
 }
 
 $controls['BtnHideHud'].Add_Click({ Set-Status (Send-GameCommand "HideHud") })
 $controls['BtnCam9'].Add_Click({ Set-Status (Send-GameCommand "Cam_Mode 9") })
+$controls['BtnEscMenu'].Add_Click({ Send-EscKey })
 $controls['BtnPathAdd'].Add_Click({ Do-PathAdd })
 $controls['BtnPathPlay'].Add_Click({ Do-PathPlay })
 $controls['BtnPathStop'].Add_Click({ Set-Status (Send-GameCommand "PathStop") })
@@ -302,6 +331,15 @@ $controls['BtnSpeed'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     Set-Status (Send-GameCommand "Cam_MoveSpeed $sp")
+})
+$controls['BtnKeySpeed'].Add_Click({
+    $sel = $controls['LvKeys'].SelectedItem
+    $sp = $controls['TbSpeed'].Text.Trim()
+    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
+    if ( $sel -ne $null ) {
+        Set-Status (Send-GameCommand "PathSetKeySpeed $($sel.Num) $sp")
+        Track-SetKeySpeed $sel.Num $sp
+    } else { Set-Status "select a keyframe row first" }
 })
 $controls['LvKeys'].Add_MouseDoubleClick({
     $sel = $controls['LvKeys'].SelectedItem

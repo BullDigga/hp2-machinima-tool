@@ -102,6 +102,16 @@ exec function PathGoto(int iIndex)
 	harry(Viewport.Actor).Cam.PathGotoKey(iIndex);
 }
 
+exec function PathSetKeySpeed(int iIndex, float fSpeed)
+{
+	harry(Viewport.Actor).Cam.PathSetKeySpeed(iIndex, fSpeed);
+}
+
+exec function PathPlaySpeed()
+{
+	harry(Viewport.Actor).Cam.PathPlaySpeedPath();
+}
+
 exec function PathSave()
 {
 	harry(Viewport.Actor).Cam.PathExportIni();
