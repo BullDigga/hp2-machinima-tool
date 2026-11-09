@@ -432,6 +432,10 @@ function Sync-FromLog([switch]$Force) {
             switch ( $e.T ) {
                 'CLEAR' { $rows.Clear() | Out-Null }
                 'DEL'   { $i = [int]$e.D; if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) } }
+                'MAP'   {
+                    # v5.6: имя карты идёт в том же PATHEV-потоке (событие от BaseCam.PathLogMap)
+                    if ( $e.D -ne "" ) { $script:CurrentMap = $e.D }
+                }
                 'ADD'   {
                     $p = $e.D -split ','
                     if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum ) {
@@ -554,9 +558,9 @@ function Send-PathSaveAndSync([string]$prefix) {
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="HP2 Machinima Panel" Width="720" SizeToContent="Height"
+        Title="HP2 Machinima Panel" Width="800" Height="640" MinWidth="800" MinHeight="460"
         Topmost="True" Background="{DynamicResource BgBrush}" WindowStyle="None" AllowsTransparency="True"
-        ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60"
+        ResizeMode="CanResizeWithGrip" WindowStartupLocation="Manual" Left="20" Top="60"
         FontFamily="Segoe UI">
   <Window.Resources>
     <SolidColorBrush x:Key="BgBrush" Color="#F21E1E2E"/>
@@ -575,11 +579,12 @@ function Send-PathSaveAndSync([string]$prefix) {
 
     <Style TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="BorderThickness" Value="0,0,0,1"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border CornerRadius="8" Background="{TemplateBinding Background}"
-                    BorderBrush="{DynamicResource LineBrush}" BorderThickness="0,0,0,1">
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,4"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -624,7 +629,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -657,7 +662,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         </Border>
       </UniformGrid>
       <Button Name="BtnTheme" Grid.Column="2" Content="☀" Width="34" Height="30" FontSize="14" BorderThickness="0"
-              Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+              Margin="0,0,12,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnClose" Grid.Column="3" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
@@ -722,7 +727,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="3*"/>
         <ColumnDefinition Width="1*"/>
       </Grid.ColumnDefinitions>
-      <DataGrid Name="DgKeys" Height="170" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
+      <DataGrid Name="DgKeys" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
@@ -773,28 +778,31 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"/>
     </UniformGrid>
 
-    <!-- parameters: two rows (FOV / Fly speed), each with per-key and all-keys apply -->
+    <!-- parameters: two rows (FOV / Fly speed) on shared columns, so key/ALL buttons align by X -->
     <Grid Grid.Row="9" Margin="3,0,3,6">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
-      <StackPanel Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,4">
-        <TextBlock Text="📷 FOV" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
-        <TextBox Name="TbFov" Text="90" Width="52" Height="30" FontSize="13"
-                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-        <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
-        <Button Name="BtnFovKey" Content="FOV → key" Height="30" Margin="10,0,0,0" Background="#6C71C4" Foreground="White"/>
-        <Button Name="BtnFovAll" Content="FOV → ALL" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
-      </StackPanel>
-      <StackPanel Grid.Row="1" Orientation="Horizontal" VerticalAlignment="Center">
-        <TextBlock Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
-        <TextBox Name="TbSpeed" Text="500" Width="52" Height="30" FontSize="13"
-                 VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-        <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
-        <Button Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
-        <Button Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
-      </StackPanel>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="📷 FOV" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <TextBox Grid.Row="0" Grid.Column="1" Name="TbFov" Text="90" Width="56" Height="30" FontSize="13" Margin="0,0,0,4"
+               VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Grid.Row="0" Grid.Column="2" Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,4" Background="#6C71C4" Foreground="White"/>
+      <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="500" Width="56" Height="30" FontSize="13"
+               VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+      <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
+      <Button Grid.Row="1" Grid.Column="3" Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Grid.Row="1" Grid.Column="4" Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
     </Grid>
 
     <!-- status + transparency -->
