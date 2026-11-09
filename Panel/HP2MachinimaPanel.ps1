@@ -98,6 +98,101 @@ public class KeyRow {
 }
 "@
 
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class MemScanPanel {
+    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint a, bool b, int pid);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MBI { public IntPtr BaseAddress; public IntPtr AllocationBase; public uint AllocationProtect; public IntPtr RegionSize; public uint State; public uint Protect; public uint Type; }
+    [DllImport("kernel32.dll")] public static extern int VirtualQueryEx(IntPtr h, IntPtr addr, out MBI info, uint len);
+
+    // ищем область памяти с полным логом сессии и выгружаем события PATH*
+    public static string GetLogEvents(int pid) {
+        IntPtr h = OpenProcess(0x0410, false, pid);
+        if ( h == IntPtr.Zero ) return "|OPENFAILED";
+        // ---- пасс 1: разведка - ищем UTF-16LE "ScriptLog: PATH" (лог в памяти wide) ----
+        byte[] wprobe = System.Text.Encoding.Unicode.GetBytes("ScriptLog: PATH");
+        long bestAddr = 0; long bestSize = 0; int bestCount = -1;
+        long addr = 0x10000;
+        MBI mbi;
+        byte[] probe = new byte[0x400000];
+        long totRead = 0; long failCnt = 0; long regCnt = 0;
+        while ( VirtualQueryEx(h, (IntPtr)addr, out mbi, (uint)Marshal.SizeOf(typeof(MBI))) != 0 ) {
+            long size = mbi.RegionSize.ToInt64();
+            if ( mbi.State == 0x1000 && size > 0 ) {
+                regCnt++;
+                int cnt = 0;
+                long off = 0;
+                while ( off < size ) {
+                    IntPtr read;
+                    int toRead = (int)Math.Min(size - off, probe.Length);
+                    if ( ReadProcessMemory(h, (IntPtr)(mbi.BaseAddress.ToInt64() + off), probe, (IntPtr)toRead, out read) ) {
+                        totRead += read.ToInt64();
+                        int n = read.ToInt32();
+                        for ( int i = 0; i <= n - wprobe.Length; i++ ) {
+                            if ( probe[i] != wprobe[0] || probe[i+1] != wprobe[1] ) continue;
+                            bool ok = true;
+                            for ( int k = 2; k < wprobe.Length; k++ ) { if ( probe[i+k] != wprobe[k] ) { ok = false; break; } }
+                            if ( ok ) { cnt++; i += wprobe.Length; }
+                        }
+                    } else { failCnt++; }
+                    off += 0x400000;
+                }
+                if ( cnt > bestCount ) { bestCount = cnt; bestAddr = mbi.BaseAddress.ToInt64(); bestSize = size; }
+            }
+            addr += size;
+            if ( addr > 0x7FFFFFFEFFFF ) break;
+        }
+        if ( bestCount <= 0 ) { CloseHandle(h); return "|BEST:" + bestCount + ",0 regs=" + regCnt + " read=" + totRead + " fail=" + failCnt + "\n"; }
+        // ---- пасс 2: извлечение wide-событий из лучшей области чанками с перекрытием ----
+        var sb = new System.Text.StringBuilder();
+        var seen = new System.Collections.Generic.HashSet<long>();
+        int chunk = 0x400000;
+        int overlap = 4096;
+        byte[] buf = new byte[chunk + overlap];
+        long pos = 0;
+        while ( pos < bestSize ) {
+            int toRead = (int)Math.Min(bestSize - pos + overlap, buf.Length);
+            if ( toRead > bestSize - pos && bestSize - pos < buf.Length ) toRead = (int)(bestSize - pos);
+            IntPtr rd;
+            if ( ReadProcessMemory(h, (IntPtr)(bestAddr + pos), buf, (IntPtr)toRead, out rd) ) {
+                int n = rd.ToInt32();
+                string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
+                // события в порядке позиций
+                var marks = new System.Collections.Generic.List<long>();
+                var types = new System.Collections.Generic.List<int>();
+                for ( int i = s.IndexOf("PATHCLEAR"); i >= 0; i = s.IndexOf("PATHCLEAR", i + 9) ) { marks.Add(i); types.Add(0); }
+                for ( int i = s.IndexOf("PATHDEL:"); i >= 0; i = s.IndexOf("PATHDEL:", i + 8) ) { marks.Add(i); types.Add(1); }
+                for ( int i = s.IndexOf("PATHADD:"); i >= 0; i = s.IndexOf("PATHADD:", i + 8) ) { marks.Add(i); types.Add(2); }
+                for ( int i = s.IndexOf("PATHSPEED:"); i >= 0; i = s.IndexOf("PATHSPEED:", i + 10) ) { marks.Add(i); types.Add(3); }
+                // сортировка вставками по позиции (мало элементов)
+                for ( int a = 1; a < marks.Count; a++ ) {
+                    long km = marks[a]; int kt = types[a]; int b = a - 1;
+                    while ( b >= 0 && marks[b] > km ) { marks[b+1] = marks[b]; types[b+1] = types[b]; b--; }
+                    marks[b+1] = km; types[b+1] = kt;
+                }
+                for ( int mi = 0; mi < marks.Count; mi++ ) {
+                    long abs = (pos >> 1) + marks[mi];   // абсолютная позиция в char'ах
+                    if ( !seen.Add(abs) ) continue;
+                    int st = (int)marks[mi];
+                    int en = st;
+                    while ( en < s.Length && s[en] >= 32 ) en++;
+                    string tok = s.Substring(st, en - st);
+                    if ( types[mi] == 0 ) sb.Append("PATHCLEAR\n");
+                    else sb.Append(tok.Replace(':', '|') + "\n");
+                }
+            }
+            pos += chunk;
+        }
+        CloseHandle(h);
+        return "|BEST:" + bestCount + "," + bestSize + "\n" + sb.ToString();
+    }
+}
+"@
+
 $VK = @{ grave = 0xC0; enter = 0x0D; space = 0x20; shift = 0x10 }
 for ($i = 0; $i -lt 26; $i++) { $VK[[string][char](65 + $i)] = 0x41 + $i }
 for ($i = 0; $i -lt 10; $i++) { $VK[[string][char](48 + $i)] = 0x30 + $i }
@@ -148,10 +243,12 @@ function Send-GameCommand([string]$cmd) {
     return "$cmd  OK  " + (Get-Date -Format HH:mm:ss)
 }
 
-# ---------- keyframe table: источник истины = ini игры ----------
-# v4: PathAdd/PathSave в игре теперь пишут SavedPathData через HPConsole.SaveConfig
-# (секция [HGame.HPConsole] реально пишется в ini). Панель читает ini и заполняет
-# X/Y/Z/Yaw/Pitch/FOV/Speed. Редактирование Speed в таблице -> PathSetKeySpeed.
+# ---------- keyframe table: источник истины = лог игры ----------
+# v4.3: ini-канал мёртв (SaveConfig молчит в M212 даже из HPConsole). Вместо него:
+# игра запускается через 'Start Game with Log.bat' (-log) и движок пишет лог-файл;
+# каждый PathAdd/PathDel/PathClear/PathSetKeySpeed уже пишет событие PATH* в лог.
+# Панель переигрывает события и заполняет X/Y/Z/Yaw/Pitch/FOV/Speed.
+# Редактирование Speed в таблице -> PathSetKeySpeed -> событие PATHSPEED в логе.
 
 $script:IniPaths = @(
     "F:\Harry Potter and the Chamber of Secrets\system\DefUser.ini",
@@ -189,40 +286,92 @@ function Refresh-Table {
     }
 }
 
-function Sync-FromIni {
-    $s = Read-SavedPathData
+function Sync-FromLog {
+    # v4.4: источник истины = события PATH* (PATHADD/PATHDEL/PATHCLEAR/PATHSPEED).
+    # Сначала лог-файл (если движок его пишет), иначе - скан памяти Game.exe
+    # (буфер скрытого лог-окна содержит "ScriptLog: PATHADD:x,y,z,yaw,pitch,fov,spd").
     $rows = New-Object System.Collections.ArrayList
-    if ( $s -ne "" ) {
-        foreach ( $item in $s -split ';' ) {
-            $p = ($item -split ',')
-            if ( $p.Count -lt 6 ) { continue }
-            $r = New-Object KeyRow
-            $r.Num    = $rows.Count
-            $r.X      = [double]$p[0]
-            $r.Y      = [double]$p[1]
-            $r.Z      = [double]$p[2]
-            $r.Yaw    = [int][double]$p[3]
-            $r.Pitch  = [int][double]$p[4]
-            $r.FOV    = [double]$p[5]
-            if ( $p.Count -ge 7 ) { $r.Speed = [double]$p[6] } else { $r.Speed = 250 }
-            [void]$rows.Add($r)
+    $txt = ""
+    $src = ""
+    $lf = Find-LogFile
+    if ( $lf -ne "" ) {
+        try { $txt = [System.IO.File]::ReadAllText($lf); $src = "log file" } catch { $txt = "" }
+    }
+    if ( $txt -eq "" ) {
+        $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ( $gp -ne $null ) {
+            try { $txt = [MemScanPanel]::GetLogEvents($gp.Id); $src = "memory" } catch { $txt = "" }
         }
     }
+
+    if ( $txt -ne "" ) {
+        # только текущая сессия лог-файла
+        $idx = $txt.LastIndexOf("Log file open")
+        if ( $idx -gt 0 -and $src -eq "log file" ) { $txt = $txt.Substring($idx) }
+        $rxAdd = [regex]'PATHADD[:\|]([-0-9\.,eE\+]+)'
+        $rxDel = [regex]'PATHDEL[:\|](\d+)'
+        $rxClr = [regex]'PATHCLEAR'
+        $rxSpd = [regex]'PATHSPEED[:\|](\d+),([-0-9\.,eE\+]+)'
+        $ev = @()
+        foreach ( $m in $rxClr.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=0; A=''; B=''} }
+        foreach ( $m in $rxDel.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=1; A=$m.Groups[1].Value; B=''} }
+        foreach ( $m in $rxAdd.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=2; A=$m.Groups[1].Value; B=''} }
+        foreach ( $m in $rxSpd.Matches($txt) ) { $ev += New-Object PSObject -Property @{Pos=$m.Index; T=3; A=$m.Groups[1].Value; B=$m.Groups[2].Value} }
+        $isNum = '^-?\d+(\.\d+)?$'
+        foreach ( $e in ($ev | Sort-Object Pos) ) {
+            switch ( $e.T ) {
+                0 { $rows.Clear() | Out-Null }
+                1 { $i = [int]$e.A; if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) } }
+                2 {
+                    $p = $e.A -split ','
+                    if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum ) {
+                        $r = New-Object KeyRow
+                        $r.Num   = $rows.Count
+                        $r.X     = [double]$p[0]
+                        $r.Y     = [double]$p[1]
+                        $r.Z     = [double]$p[2]
+                        $r.Yaw   = [int][double]$p[3]
+                        $r.Pitch = [int][double]$p[4]
+                        $r.FOV   = [double]$p[5]
+                        if ( $p.Count -ge 7 -and $p[6] -match $isNum ) { $r.Speed = [double]$p[6] } else { $r.Speed = 250 }
+                        [void]$rows.Add($r)
+                    }
+                }
+                3 { $i = [int]$e.A; if ( $i -ge 0 -and $i -lt $rows.Count -and $e.B -match $isNum ) { $rows[$i].Speed = [double]$e.B } }
+            }
+        }
+        for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
+    }
+
     $script:KeyRows = $rows
     Refresh-Table
+    if ( $src -eq "memory" ) { Set-Status "table: $($rows.Count) keys (memory scan OK)" }
+    elseif ( $src -eq "log file" ) { Set-Status "table: $($rows.Count) keys (log file OK)" }
+    else { Set-Status "no keyframe source - is the game running?" }
+}
+
+function Find-LogFile {
+    $cut = (Get-Date).AddHours(-12)
+    $best = $null
+    Get-ChildItem -Path "F:\Harry Potter and the Chamber of Secrets\system" -Filter "*.log" -ErrorAction SilentlyContinue | ForEach-Object {
+        if ( $_.Name -match '^(WS_FTP|uninstal)' ) { return }
+        if ( $_.LastWriteTime -gt $cut ) {
+            if ( $best -eq $null -or $_.LastWriteTime -gt $best.LastWriteTime ) { $best = $_ }
+        }
+    }
+    if ( $best -ne $null ) { return $best.FullName }
+    return ""
 }
 
 function Sync-AfterCommand([string]$status) {
-    # дать игре дописать ini после команды
+    # дать игре дописать лог после команды
     Start-Sleep -Milliseconds 700
-    Sync-FromIni
+    Sync-FromLog
     if ( $status -ne "" ) { Set-Status $status }
 }
 
 function Send-PathSaveAndSync([string]$prefix) {
-    $st = Send-GameCommand "PathSave"
-    if ( $prefix -ne "" ) { $st = $prefix + " | " + $st }
-    Sync-AfterCommand $st
+    Sync-AfterCommand $prefix
 }
 
 # ---------- UI ----------
@@ -335,7 +484,7 @@ $controls['BtnPathClear'].Add_Click({
     Set-Status (Send-GameCommand "PathClear")
     Track-ClearKeys
 })
-$controls['BtnRefresh'].Add_Click({ Send-PathSaveAndSync "" })
+$controls['BtnRefresh'].Add_Click({ Sync-FromLog })
 $controls['BtnGoto'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
@@ -424,7 +573,7 @@ $window.Add_Loaded({
         return [IntPtr]::Zero
     })
     Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
-    Sync-FromIni
+    Sync-FromLog
 })
 
 $window.Add_Closing({
