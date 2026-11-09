@@ -85,6 +85,19 @@ public static class GameCtl {
 }
 "@
 
+Add-Type -TypeDefinition @"
+public class KeyRow {
+    public int Num { get; set; }
+    public double X { get; set; }
+    public double Y { get; set; }
+    public double Z { get; set; }
+    public int Yaw { get; set; }
+    public int Pitch { get; set; }
+    public double FOV { get; set; }
+    public double Speed { get; set; }
+}
+"@
+
 $VK = @{ grave = 0xC0; enter = 0x0D; space = 0x20; shift = 0x10 }
 for ($i = 0; $i -lt 26; $i++) { $VK[[string][char](65 + $i)] = 0x41 + $i }
 for ($i = 0; $i -lt 10; $i++) { $VK[[string][char](48 + $i)] = 0x30 + $i }
@@ -135,69 +148,81 @@ function Send-GameCommand([string]$cmd) {
     return "$cmd  OK  " + (Get-Date -Format HH:mm:ss)
 }
 
-# ---------- keyframe table: LOCAL tracking (panel counts keys itself) ----------
-# Игра не отдаёт данные наружу (SaveConfig/set ini: не пишут в M212) -
-# панель считает кадры сама: F8=+1, Del=-1, Clear=0. Координаты не нужны:
-# двойной клик = PathGoto (камера прыгает к кадру - видно глазами).
+# ---------- keyframe table: источник истины = ini игры ----------
+# v4: PathAdd/PathSave в игре теперь пишут SavedPathData через HPConsole.SaveConfig
+# (секция [HGame.HPConsole] реально пишется в ini). Панель читает ini и заполняет
+# X/Y/Z/Yaw/Pitch/FOV/Speed. Редактирование Speed в таблице -> PathSetKeySpeed.
 
-$script:KeyFovs = New-Object System.Collections.ArrayList    # FOV на момент добавления
-$script:KeySpeeds = New-Object System.Collections.ArrayList  # скорость сегмента (для PathPlaySpeed)
+$script:IniPaths = @(
+    "F:\Harry Potter and the Chamber of Secrets\system\DefUser.ini",
+    "F:\Harry Potter and the Chamber of Secrets\system\Default.ini"
+)
+$script:KeyRows = New-Object System.Collections.ArrayList
 
-function Refresh-Table {
-    $rows = @()
-    for ( $i = 0; $i -lt $script:KeyFovs.Count; $i++ ) {
-        $sp = "-"
-        if ( $i -lt $script:KeySpeeds.Count ) { $sp = $script:KeySpeeds[$i] }
-        $rows += [PSCustomObject]@{
-            Num = $i
-            X   = "-"
-            Y   = "-"
-            Z   = "-"
-            Yaw = "-"
-            Pitch = "-"
-            FOV = $script:KeyFovs[$i]
-            Speed = $sp
+function Read-SavedPathData {
+    foreach ( $f in $script:IniPaths ) {
+        if ( Test-Path $f ) {
+            try {
+                $txt = [System.IO.File]::ReadAllText($f)
+                $sec = [regex]::Match($txt, '(?ms)^\[HGame\.HPConsole\]\s*(.*?)(?=^\[|\z)')
+                if ( $sec.Success ) {
+                    $m = [regex]::Match($sec.Groups[1].Value, '(?m)^SavedPathData\s*=\s*(.*)$')
+                    if ( $m.Success -and $m.Groups[1].Value.Trim() -ne "" ) {
+                        return $m.Groups[1].Value.Trim()
+                    }
+                }
+            } catch { }
         }
     }
-    $controls['LvKeys'].ItemsSource = $rows
-    if ( $rows.Count -eq 0 ) {
+    return ""
+}
+
+function Refresh-Table {
+    # строки уже собраны в $script:KeyRows
+    $controls['DgKeys'].ItemsSource = $script:KeyRows
+    $n = 0
+    if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
+    if ( $n -eq 0 ) {
         Set-Status "table: 0 keyframes - press F8 in game to add"
     } else {
-        Set-Status "table: $($rows.Count) keyframes"
+        Set-Status "table: $n keyframes (ini synced)"
     }
 }
 
-function Track-AddKey {
-    $fov = $controls['TbFov'].Text.Trim()
-    if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
-    $sp = $controls['TbSpeed'].Text.Trim()
-    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
-    [void]$script:KeyFovs.Add($fov)
-    [void]$script:KeySpeeds.Add($sp)
+function Sync-FromIni {
+    $s = Read-SavedPathData
+    $rows = New-Object System.Collections.ArrayList
+    if ( $s -ne "" ) {
+        foreach ( $item in $s -split ';' ) {
+            $p = ($item -split ',')
+            if ( $p.Count -lt 6 ) { continue }
+            $r = New-Object KeyRow
+            $r.Num    = $rows.Count
+            $r.X      = [double]$p[0]
+            $r.Y      = [double]$p[1]
+            $r.Z      = [double]$p[2]
+            $r.Yaw    = [int][double]$p[3]
+            $r.Pitch  = [int][double]$p[4]
+            $r.FOV    = [double]$p[5]
+            if ( $p.Count -ge 7 ) { $r.Speed = [double]$p[6] } else { $r.Speed = 250 }
+            [void]$rows.Add($r)
+        }
+    }
+    $script:KeyRows = $rows
     Refresh-Table
 }
 
-function Track-DelKey([int]$idx) {
-    if ( $idx -ge 0 -and $idx -lt $script:KeyFovs.Count ) {
-        $script:KeyFovs.RemoveAt($idx)
-    }
-    if ( $idx -ge 0 -and $idx -lt $script:KeySpeeds.Count ) {
-        $script:KeySpeeds.RemoveAt($idx)
-    }
-    Refresh-Table
+function Sync-AfterCommand([string]$status) {
+    # дать игре дописать ini после команды
+    Start-Sleep -Milliseconds 700
+    Sync-FromIni
+    if ( $status -ne "" ) { Set-Status $status }
 }
 
-function Track-ClearKeys {
-    $script:KeyFovs.Clear()
-    $script:KeySpeeds.Clear()
-    Refresh-Table
-}
-
-function Track-SetKeySpeed([int]$idx, [string]$val) {
-    if ( $idx -ge 0 -and $idx -lt $script:KeySpeeds.Count ) {
-        $script:KeySpeeds[$idx] = $val
-    }
-    Refresh-Table
+function Send-PathSaveAndSync([string]$prefix) {
+    $st = Send-GameCommand "PathSave"
+    if ( $prefix -ne "" ) { $st = $prefix + " | " + $st }
+    Sync-AfterCommand $st
 }
 
 # ---------- UI ----------
@@ -232,22 +257,23 @@ function Track-SetKeySpeed([int]$idx, [string]$val) {
       <Button Name="BtnPathClear" Content="Clear" Height="30" Margin="2" Background="#F38BA8" Foreground="#1E1E2E"/>
     </UniformGrid>
 
-    <TextBlock Text="KEYFRAMES (double-click = go to key)" Foreground="#A6ADC8" FontSize="11" Margin="2,8,0,2"/>
-    <ListView Name="LvKeys" Height="150" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A"
-              FontFamily="Consolas" FontSize="11">
-      <ListView.View>
-        <GridView>
-          <GridViewColumn Header="#" Width="34" DisplayMemberBinding="{Binding Num}"/>
-          <GridViewColumn Header="X" Width="62" DisplayMemberBinding="{Binding X}"/>
-          <GridViewColumn Header="Y" Width="62" DisplayMemberBinding="{Binding Y}"/>
-          <GridViewColumn Header="Z" Width="62" DisplayMemberBinding="{Binding Z}"/>
-          <GridViewColumn Header="Yaw" Width="56" DisplayMemberBinding="{Binding Yaw}"/>
-          <GridViewColumn Header="Pitch" Width="50" DisplayMemberBinding="{Binding Pitch}"/>
-          <GridViewColumn Header="FOV" Width="44" DisplayMemberBinding="{Binding FOV}"/>
-          <GridViewColumn Header="Speed" Width="50" DisplayMemberBinding="{Binding Speed}"/>
-        </GridView>
-      </ListView.View>
-    </ListView>
+    <TextBlock Text="KEYFRAMES (double-click = go to key; Speed editable)" Foreground="#A6ADC8" FontSize="11" Margin="2,8,0,2"/>
+    <DataGrid Name="DgKeys" Height="160" Background="#181825" Foreground="#CDD6F4" BorderBrush="#45475A"
+              FontFamily="Consolas" FontSize="11" AutoGenerateColumns="False" CanUserAddRows="False"
+              CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
+              HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="#181825"
+              AlternatingRowBackground="#313244">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="#" Width="30" Binding="{Binding Num}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="X" Width="62" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Y" Width="62" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Z" Width="62" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Yaw" Width="54" Binding="{Binding Yaw}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Pitch" Width="48" Binding="{Binding Pitch}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="FOV" Width="44" Binding="{Binding FOV}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Speed" Width="52" Binding="{Binding Speed}" IsReadOnly="False"/>
+      </DataGrid.Columns>
+    </DataGrid>
     <UniformGrid Columns="3" Margin="0,4">
       <Button Name="BtnRefresh" Content="Refresh table" Height="30" Margin="2" Background="#89DCEB" Foreground="#1E1E2E"/>
       <Button Name="BtnGoto" Content="Go to selected" Height="30" Margin="2" Background="#89DCEB" Foreground="#1E1E2E"/>
@@ -273,7 +299,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','LvKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','TbStatus')) {
+foreach ($name in @('BtnHideHud','BtnCam9','BtnEscMenu','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathStop','BtnPathList','BtnPathClear','DgKeys','BtnRefresh','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -282,8 +308,8 @@ function Set-Status([string]$s) {
 }
 
 function Do-PathAdd {
-    Set-Status (Send-GameCommand "PathAdd")
-    Track-AddKey
+    $st = Send-GameCommand "PathAdd"
+    Sync-AfterCommand $st
 }
 function Do-PathPlay {
     # speed-driven playback: длительность сегментов = дистанция / скорость кадра
@@ -309,17 +335,17 @@ $controls['BtnPathClear'].Add_Click({
     Set-Status (Send-GameCommand "PathClear")
     Track-ClearKeys
 })
-$controls['BtnRefresh'].Add_Click({ Refresh-Table })
+$controls['BtnRefresh'].Add_Click({ Send-PathSaveAndSync "" })
 $controls['BtnGoto'].Add_Click({
-    $sel = $controls['LvKeys'].SelectedItem
+    $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
     else { Set-Status "select a keyframe row first" }
 })
 $controls['BtnDel'].Add_Click({
-    $sel = $controls['LvKeys'].SelectedItem
+    $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) {
-        Set-Status (Send-GameCommand "PathDel $($sel.Num)")
-        Track-DelKey $sel.Num
+        $st = Send-GameCommand "PathDel $($sel.Num)"
+        Send-PathSaveAndSync $st
     } else { Set-Status "select a keyframe row first" }
 })
 $controls['BtnSetFov'].Add_Click({
@@ -333,16 +359,35 @@ $controls['BtnSpeed'].Add_Click({
     Set-Status (Send-GameCommand "Cam_MoveSpeed $sp")
 })
 $controls['BtnKeySpeed'].Add_Click({
-    $sel = $controls['LvKeys'].SelectedItem
+    $sel = $controls['DgKeys'].SelectedItem
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     if ( $sel -ne $null ) {
-        Set-Status (Send-GameCommand "PathSetKeySpeed $($sel.Num) $sp")
-        Track-SetKeySpeed $sel.Num $sp
+        $st = Send-GameCommand "PathSetKeySpeed $($sel.Num) $sp"
+        Send-PathSaveAndSync $st
     } else { Set-Status "select a keyframe row first" }
 })
-$controls['LvKeys'].Add_MouseDoubleClick({
-    $sel = $controls['LvKeys'].SelectedItem
+# Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
+$controls['DgKeys'].Add_CellEditEnding({
+    param($sender, $e)
+    if ( $e.Column.Header -eq "Speed" ) {
+        $val = ""
+        try { $val = $e.EditingElement.Text } catch { }
+        $row = $e.Row.Item
+        $idx = -1
+        if ( $row -ne $null ) { $idx = $row.Num }
+        $window.Dispatcher.BeginInvoke([Action]{
+            if ( $val -match '^\d+(\.\d+)?$' -and $idx -ge 0 ) {
+                $st = Send-GameCommand "PathSetKeySpeed $idx $val"
+                Send-PathSaveAndSync $st
+            } else {
+                Set-Status "bad speed value: '$val'"
+            }
+        }) | Out-Null
+    }
+})
+$controls['DgKeys'].Add_MouseDoubleClick({
+    $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
 })
 
@@ -367,10 +412,10 @@ $window.Add_Loaded({
                 2 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathPlay }) | Out-Null }
                 3 { $window.Dispatcher.BeginInvoke([Action]{ Set-Status (Send-GameCommand "PathStop") }) | Out-Null }
                 4 {
-                    # F11 = PathClear + локальный сброс (сохранение в ini в M212 не работает)
+                    # F11 = PathClear + сброс ini + таблица
                     $window.Dispatcher.BeginInvoke([Action]{
-                        Set-Status (Send-GameCommand "PathClear")
-                        Track-ClearKeys
+                        $st = Send-GameCommand "PathClear"
+                        Send-PathSaveAndSync $st
                     }) | Out-Null
                 }
             }
@@ -379,7 +424,7 @@ $window.Add_Loaded({
         return [IntPtr]::Zero
     })
     Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
-    Refresh-Table
+    Sync-FromIni
 })
 
 $window.Add_Closing({
