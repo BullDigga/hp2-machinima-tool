@@ -215,6 +215,24 @@ public class MemScanPanel {
         CloseHandle(h);
         return sb.ToString();
     }
+
+    // v5.8: фоновый скан (UI панели не блокируется, иконка ⟳ крутится)
+    public static string AsyncResult = "";
+    public static int AsyncState = 0;   // 0 idle, 1 running, 2 done
+
+    public static void StartAsync(int pid, long[] pairs) {
+        if ( AsyncState == 1 ) return;
+        AsyncState = 1;
+        AsyncResult = "";
+        System.Threading.Thread t = new System.Threading.Thread(new System.Threading.ThreadStart(() => {
+            try {
+                AsyncResult = (pairs != null && pairs.Length >= 2) ? ExtractRegions(pid, pairs) : GetLogEvents(pid);
+            } catch { AsyncResult = ""; }
+            AsyncState = 2;
+        }));
+        t.IsBackground = true;
+        t.Start();
+    }
 }
 "@
 
@@ -243,13 +261,9 @@ function Type-Command([string]$cmd) {
 
 # NOTE: the game must be the foreground window (user is playing/flying).
 # We do NOT switch focus: grave -> type -> enter -> grave right into the focused game.
-# v5.7: ТИХИЙ КАНАЛ - консоль игры больше НЕ открывается. Панель пишет команды в
-# system\PanelCmds.ini и жмёт NumPad0 (bind "NumPad0=exec PanelCmds.ini" в DefUser.ini) -
-# движок сам выполняет строки файла через exec, никакого окна консоли и фокуса ввода.
-$script:CmdsFile = "F:\Harry Potter and the Chamber of Secrets\system\PanelCmds.ini"
-$script:ExecKeyVk = 0x60    # NumPad0
-$script:UseExec = $true     # fallback: старая консоль (grave), если exec-канал не работает
-
+# v5.8: окно консоли СКРЫТО на стороне игры (HPConsole.bQuietConsole - ConsoleWindow
+# прячется в ShowConsole/Tick). Панель печатает как раньше, но окно не отрисовывается -
+# пользователь не видит никаких всплывашек.
 function Focus-GameWindow([IntPtr]$h) {
     $fg = [GameCtl]::GetForegroundWindow()
     if ($fg -eq $h) { return $true }
@@ -260,21 +274,7 @@ function Focus-GameWindow([IntPtr]$h) {
     return ([GameCtl]::GetForegroundWindow() -eq $h)
 }
 
-# тихий путь: файл + один бинд-кей
-function Send-GameCommandsExec([string[]]$cmds) {
-    $h = Find-GameWindow
-    if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
-    try {
-        [System.IO.File]::WriteAllLines($script:CmdsFile, $cmds, [System.Text.Encoding]::ASCII)
-    } catch { return "write PanelCmds.ini failed: $($_.Exception.Message)" }
-    if ( -not (Focus-GameWindow $h) ) { return "could not focus the game - click the game window once" }
-    [GameCtl]::Tap([uint16]$script:ExecKeyVk)
-    Start-Sleep -Milliseconds 120
-    return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
-}
-
-# резервный путь: консоль игры (grave -> текст -> enter -> grave)
-function Send-GameCommandsConsole([string[]]$cmds) {
+function Send-GameCommands([string[]]$cmds) {
     $h = Find-GameWindow
     if ($h -eq [IntPtr]::Zero) { return "game window not found!" }
     if ( -not (Focus-GameWindow $h) ) { return "could not focus the game - click the game window once" }
@@ -288,11 +288,6 @@ function Send-GameCommandsConsole([string[]]$cmds) {
     [GameCtl]::Tap([uint16]$VK['grave'])
     Start-Sleep -Milliseconds 80
     return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
-}
-
-function Send-GameCommands([string[]]$cmds) {
-    if ( $script:UseExec ) { return Send-GameCommandsExec $cmds }
-    return Send-GameCommandsConsole $cmds
 }
 
 function Send-GameCommand([string]$cmd) { return Send-GameCommands @($cmd) }
@@ -353,72 +348,78 @@ function Refresh-Table {
     }
 }
 
+$script:SyncBusy = $false
+$script:SyncForce = $false
+
 function Sync-FromLog([switch]$Force) {
-    # v4.9: быстрый путь через кэш областей; $Force = полный скан (Refresh, старт панели)
-    # Сначала лог-файл (если движок его пишет), иначе - скан памяти Game.exe
-    # (буфер скрытого лог-окна содержит "ScriptLog: PATHADD:x,y,z,yaw,pitch,fov,spd").
-    $rows = New-Object System.Collections.ArrayList
-    $txt = ""
-    $src = ""
+    # v5.8: асинхронно - скан памяти в C#-потоке, UI и крутящийся ⟳ живут.
+    # Завершение разбора - в Complete-SyncFromLog (вызывается из таймера).
+    if ( $script:SyncBusy ) { return }
     $lf = Find-LogFile
     if ( $lf -ne "" ) {
-        try { $txt = [System.IO.File]::ReadAllText($lf); $src = "log file" } catch { $txt = "" }
+        try {
+            $txtLF = [System.IO.File]::ReadAllText($lf)
+            if ( $txtLF -ne "" ) { Complete-SyncFromLog $txtLF; return }
+        } catch { }
     }
-    if ( $txt -eq "" ) {
-        $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ( $gp -ne $null ) {
-            # быстрый путь: кэшированные области лог-буфера (~0.2 сек вместо 1-3 сек)
-            if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) {
-                $fast = ""
-                try { $fast = [MemScanPanel]::ExtractRegions($gp.Id, [long[]]$script:ScanCache.Regions) } catch { $fast = "" }
-                if ( $fast -ne "" -and $fast.Contains("PATHEV:") ) {
-                    $newMax = 0
-                    foreach ( $mm in [regex]::Matches($fast, 'PATHEV:(\d+)\|') ) {
-                        $v = [long]$mm.Groups[1].Value
-                        if ( $v -gt $newMax ) { $newMax = $v }
-                    }
-                    if ( $newMax -gt $script:ScanCache.LastSeq ) {
-                        $txt = $fast
-                        $src = "memory"
-                        $script:ScanCache.LastSeq = $newMax
+    $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ( $gp -eq $null ) { Set-Status "no keyframe source - is the game running?"; return }
+    $pairs = $null
+    if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) { $pairs = [long[]]$script:ScanCache.Regions }
+    $script:SyncBusy = $true
+    $script:SyncForce = [bool]$Force
+    [MemScanPanel]::StartAsync($gp.Id, $pairs)
+}
+
+function Complete-SyncFromLog {
+    $script:SyncBusy = $false
+    $rows = New-Object System.Collections.ArrayList
+    $txt = [MemScanPanel]::AsyncResult
+    [MemScanPanel]::AsyncResult = ""
+    $src = ""
+    $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ( $gp -eq $null ) { Set-Status "no keyframe source - is the game running?"; return }
+    if ( $txt -ne "" ) {
+        if ( $txt.StartsWith("|REGS:") ) {
+            # полный скан: первая строка = |REGS:n|addr|size|... - сохраняем области в кэш
+            $src = "memory"
+            $nl = $txt.IndexOf("`n")
+            if ( $nl -gt 0 ) {
+                $hdr = $txt.Substring(0, $nl)
+                $txt = $txt.Substring($nl + 1)
+                if ( $hdr.StartsWith("|REGS:") ) {
+                    $parts = $hdr.TrimStart('|').Split('|')
+                    if ( $parts.Length -ge 3 ) {
+                        $regs = @()
+                        foreach ( $pv in ($parts | Select-Object -Skip 1) ) { $regs += [long]$pv }
+                        $script:ScanCache.Regions = $regs
                     }
                 }
             }
-            # медленный путь: полный поиск по всей памяти (буфер переехал / первый запуск)
-            if ( $txt -eq "" ) {
-                try { $txt = [MemScanPanel]::GetLogEvents($gp.Id); $src = "memory" } catch { $txt = "" }
-                if ( $txt -ne "" ) {
-                    # первая строка = |REGS:n|addr|size|... - сохраняем области в кэш
-                    $nl = $txt.IndexOf("`n")
-                    if ( $nl -gt 0 ) {
-                        $hdr = $txt.Substring(0, $nl)
-                        $txt = $txt.Substring($nl + 1)
-                        if ( $hdr.StartsWith("|REGS:") ) {
-                            $parts = $hdr.TrimStart('|').Split('|')
-                            if ( $parts.Length -ge 3 ) {
-                                $regs = @()
-                                foreach ( $pv in ($parts | Select-Object -Skip 1) ) { $regs += [long]$pv }
-                                $script:ScanCache.Regions = $regs
-                            }
-                        }
-                    }
-                    if ( $txt -notmatch 'PATHEV:' ) { $txt = ""; $src = "" }
-                }
+            if ( $txt -notmatch 'PATHEV:' ) { $txt = ""; $src = "" }
+        } else {
+            # быстрый путь (кэш областей): принимаем только при НОВЫХ событиях
+            $src = "memory"
+            $newMax = 0
+            foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
+                $v = [long]$mm.Groups[1].Value
+                if ( $v -gt $newMax ) { $newMax = $v }
             }
-            if ( $src -eq "memory" ) {
-                $mx = 0
-                foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
-                    $v = [long]$mm.Groups[1].Value
-                    if ( $v -gt $mx ) { $mx = $v }
-                }
-                # смена процесса игры = новая сессия: seq начинаются заново
-                if ( $script:ScanCache.Pid -ne $gp.Id ) {
-                    $script:ScanCache.Pid = $gp.Id
-                    $script:ScanCache.LastSeq = $mx
-                } elseif ( $mx -gt $script:ScanCache.LastSeq ) {
-                    $script:ScanCache.LastSeq = $mx
-                }
-            }
+            if ( $newMax -le $script:ScanCache.LastSeq ) { $txt = ""; $src = "" }
+        }
+    }
+    if ( $txt -ne "" ) {
+        $mx = 0
+        foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
+            $v = [long]$mm.Groups[1].Value
+            if ( $v -gt $mx ) { $mx = $v }
+        }
+        # смена процесса игры = новая сессия: seq начинаются заново
+        if ( $script:ScanCache.Pid -ne $gp.Id ) {
+            $script:ScanCache.Pid = $gp.Id
+            $script:ScanCache.LastSeq = $mx
+        } elseif ( $mx -gt $script:ScanCache.LastSeq ) {
+            $script:ScanCache.LastSeq = $mx
         }
     }
 
@@ -531,9 +532,7 @@ function Sync-FromLog([switch]$Force) {
 
     $script:KeyRows = $rows
     Refresh-Table
-    if ( $src -eq "memory" ) { Set-Status "table: $($rows.Count) keys (memory scan OK)" }
-    elseif ( $src -eq "log file" ) { Set-Status "table: $($rows.Count) keys (log file OK)" }
-    else { Set-Status "no keyframe source - is the game running?" }
+    Set-Status "table: $($rows.Count) keys (memory scan OK)"
 }
 
 function Find-LogFile {
@@ -568,8 +567,11 @@ function Send-PathSaveAndSync([string]$prefix) {
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="HP2 Machinima Panel" Width="800" Height="640" MinWidth="800" MinHeight="460"
         Topmost="True" Background="{DynamicResource BgBrush}" WindowStyle="None" AllowsTransparency="True"
-        ResizeMode="CanResizeWithGrip" WindowStartupLocation="Manual" Left="20" Top="60"
+        ResizeMode="CanResize" WindowStartupLocation="Manual" Left="20" Top="60"
         FontFamily="Segoe UI">
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="0" ResizeBorderThickness="10" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
   <Window.Resources>
     <SolidColorBrush x:Key="BgBrush" Color="#F21E1E2E"/>
     <SolidColorBrush x:Key="PanelBrush" Color="#313244"/>
@@ -602,6 +604,9 @@ function Send-PathSaveAndSync([string]$prefix) {
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
                 <Setter Property="Opacity" Value="0.65"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.4"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -794,10 +799,16 @@ function Send-PathSaveAndSync([string]$prefix) {
         </DataGridTemplateColumn>
       </DataGrid.Columns>
     </DataGrid>
-      <Button Name="BtnRefresh" Content="⟳" Width="34" Height="34" FontSize="19" FontWeight="Bold"
+      <Button Name="BtnRefresh" Width="34" Height="34" FontSize="19" FontWeight="Bold"
               HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,8,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
-              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)"/>
+              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)">
+        <TextBlock Text="⟳" RenderTransformOrigin="0.5,0.5">
+          <TextBlock.RenderTransform>
+            <RotateTransform x:Name="RefreshRot" Angle="0"/>
+          </TextBlock.RenderTransform>
+        </TextBlock>
+      </Button>
       <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
               Background="#EB6F8E" Foreground="White"
@@ -815,8 +826,8 @@ function Send-PathSaveAndSync([string]$prefix) {
 
     <!-- table actions -->
     <UniformGrid Grid.Row="8" Columns="2" Margin="3,0,3,6">
-      <Button Name="BtnInsert" Content="➕  Insert after selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"/>
+      <Button Name="BtnInsert" Content="➕  Insert after selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
+      <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}" ToolTipService.ShowOnDisabled="True"/>
     </UniformGrid>
 
     <!-- parameters: two rows (FOV / Fly speed) on shared columns, so key/ALL buttons align by X -->
@@ -835,14 +846,14 @@ function Send-PathSaveAndSync([string]$prefix) {
       <TextBlock Grid.Row="0" Grid.Column="0" Text="📷 FOV" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
       <TextBox Grid.Row="0" Grid.Column="1" Name="TbFov" Text="90" Width="56" Height="30" FontSize="13" Margin="0,0,0,4"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Grid.Row="0" Grid.Column="2" Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,4" Background="#6C71C4" Foreground="White"/>
-      <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Grid.Row="0" Grid.Column="2" Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,4" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
+      <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
       <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold"/>
       <TextBlock Grid.Row="1" Grid.Column="0" Name="TxFlySpeed" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
       <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="500" Width="56" Height="30" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
-      <Button Grid.Row="1" Grid.Column="3" Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
+      <Button Grid.Row="1" Grid.Column="3" Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
       <Button Grid.Row="1" Grid.Column="4" Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
     </Grid>
 
@@ -866,7 +877,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','RefreshRot','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1173,20 +1184,6 @@ $window.Add_Loaded({
     })
     Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
     Sync-FromLog -Force
-    # v5.7: проверка ТИХОГО канала команд: PathPing даёт новое событие в памяти игры.
-    # Поймали -> exec-канал жив (консоль не открывается); нет -> fallback на консоль (grave).
-    if ( (Find-GameWindow) -ne [IntPtr]::Zero ) {
-        $beforeSeq = $script:ScanCache.LastSeq
-        [void](Send-GameCommands @("PathPing"))
-        Start-Sleep -Milliseconds 700
-        Sync-FromLog -Force
-        if ( $script:ScanCache.LastSeq -gt $beforeSeq ) {
-            Set-Status "cmd channel: exec (silent) OK"
-        } else {
-            $script:UseExec = $false
-            Set-Status "cmd channel: console fallback (bind NumPad0/exec missing)"
-        }
-    }
 })
 
 $window.Add_Closing({
@@ -1214,6 +1211,30 @@ function Set-Theme([bool]$dark) {
 }
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
+# ---------- v5.8: кнопки, требующие выбранный кадр ----------
+$script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto')
+function Update-SelectionButtons {
+    $has = $controls['DgKeys'].SelectedItem -ne $null
+    foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
+}
+$controls['DgKeys'].Add_SelectionChanged({ Update-SelectionButtons })
+Update-SelectionButtons
+
+# ---------- v5.8: ресайз окна за кромки - WindowChrome (ResizeBorderThickness=10) ----------
+
+# ---------- v5.8: таймер UI: крутящийся ⟳ + завершение фонового скана ----------
+$script:SpinAngle = 0
+$script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
+$script:UiTimer.Add_Tick({
+    if ( $script:SyncBusy ) {
+        $script:SpinAngle = ($script:SpinAngle + 30) % 360
+        $controls['RefreshRot'].Angle = $script:SpinAngle
+    }
+    if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
+})
+$script:UiTimer.Start()
+
 # ---------- localization (EN default / RU) ----------
 $script:LocData = @{
     en = @{
@@ -1221,30 +1242,34 @@ $script:LocData = @{
         AddKey = "📷  ADD KEYFRAME"
         PlayTime = "▶  PLAY (by TIME)"; Sec = "sec"
         PlaySpeed = "▶  PLAY (by keyframe SPEEDS)"; Stop = "■  Stop"
-        Keyframes = "▦ KEYFRAMES (double-click = go to key; Speed editable)"
+        Keyframes = "▦ KEYFRAMES (double-click = go to key)"
         NoMap = "(no map)"; Map = "🗺 MAP"
         Export = "↗  Export to file"; Import = "↙  Import from file"
-        Insert = "➕  Insert after selected"; Goto = "📍  Go to selected"
+        Insert = "➕  Insert after selected key"; Goto = "📍  Go to selected key"
         Fov = "📷 FOV"; FlySpeed = "✈ Fly speed"
         SetFov = "Set FOV"; FovKey = "🎯 FOV → key"; FovAll = "🌐 FOV → ALL"
         SetSpeed = "Set fly speed"; SpeedKey = "⚡ Speed → key"; SpeedAll = "🗂 Speed → ALL"
         Transparent = "Transparent"
         HkFrame = "  frame"; HkPlay = "  play"; HkStop = "  stop"; HkClear = "  clear"
+        TipSelect = "Select a keyframe row in the table first"
+        TipEdit = "Edit the value - the button unlocks when it differs from the applied one"
     }
     ru = @{
         HudHide = "🙈  Скрыть HUD"; HudShow = "👁  Показать HUD"
         AddKey = "📷  ДОБАВИТЬ КАДР"
-        PlayTime = "▶  ПЛЕЙ (по времени)"; Sec = "сек"
-        PlaySpeed = "▶  ПЛЕЙ (по скоростям кадров)"; Stop = "■  Стоп"
-        Keyframes = "▦ КАДРЫ (двойной клик = перейти; Speed правится)"
+        PlayTime = "▶  ВОСПРОИЗВЕСТИ (по времени)"; Sec = "сек"
+        PlaySpeed = "▶  ВОСПРОИЗВЕСТИ (по скоростям кадров)"; Stop = "■  Стоп"
+        Keyframes = "▦ КАДРЫ (двойной клик = перейти к кадру)"
         NoMap = "(нет карты)"; Map = "🗺 КАРТА"
         Export = "↗  Экспорт в файл"; Import = "↙  Импорт из файла"
-        Insert = "➕  Вставить после выбранного"; Goto = "📍  Перейти к выбранному"
+        Insert = "➕  Вставить после выбранного кадра"; Goto = "📍  Перейти к выбранному кадру"
         Fov = "📷 FOV"; FlySpeed = "✈ Скорость полёта"
         SetFov = "Задать FOV"; FovKey = "🎯 FOV → кадр"; FovAll = "🌐 FOV → ВСЕ"
         SetSpeed = "Задать скорость"; SpeedKey = "⚡ Скор. → кадр"; SpeedAll = "🗂 Скор. → ВСЕ"
         Transparent = "Прозрачность"
-        HkFrame = "  кадр"; HkPlay = "  плей"; HkStop = "  стоп"; HkClear = "  очистка"
+        HkFrame = "  кадр"; HkPlay = "  воспроизв."; HkStop = "  стоп"; HkClear = "  очистка"
+        TipSelect = "Сначала выберите кадр в таблице (клик по строке)"
+        TipEdit = "Измените значение - кнопка станет активной, когда оно отличается от применённого"
     }
 }
 $script:Lang = "en"
@@ -1277,6 +1302,9 @@ function Set-Lang([string]$lang) {
     $controls['TxSec'].Text = $L.Sec
     $controls['TxFlySpeed'].Text = $L.FlySpeed
     $controls['TbMap'].Text = Get-MapText
+    # подсказки на серых кнопках
+    foreach ( $b in @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto') ) { $controls[$b].ToolTip = $L.TipSelect }
+    foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
     $controls['FlagRU'].Visibility = if ( $lang -eq "ru" ) { "Visible" } else { "Collapsed" }
     Save-Settings
