@@ -473,6 +473,14 @@ function Sync-FromLog([switch]$Force) {
                         $rows.Insert($i, $r)
                     }
                 }
+                'KEYFOV' {
+                    $pp = $e.D -split ','
+                    $i = [int]$pp[0]
+                    if ( $pp.Count -ge 2 -and $i -ge 0 -and $i -lt $rows.Count -and $pp[1] -match $isNum ) { $rows[$i].FOV = [double]$pp[1] }
+                }
+                'ALLFOV' {
+                    if ( $e.D -match $isNum ) { foreach ( $r in $rows ) { $r.FOV = [double]$e.D } }
+                }
             }
         }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
@@ -563,6 +571,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="SyncBrush" Color="#FF1F3D2E"/>
     <SolidColorBrush x:Key="DirtyBrush" Color="#FF3A3F4D"/>
     <SolidColorBrush x:Key="NavBrush" Color="#FF89DCEB"/>
+    <BooleanToVisibilityConverter x:Key="BoolToVis"/>
 
     <Style TargetType="Button">
       <Setter Property="Cursor" Value="Hand"/>
@@ -680,7 +689,7 @@ function Send-PathSaveAndSync([string]$prefix) {
               <RowDefinition Height="Auto"/>
               <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
-            <TextBlock Text="🕐 FLIGHT TIME, SEC — whole path in N seconds" Foreground="#C9CCEF" FontSize="11"/>
+            <TextBlock Text="🕐 FLIGHT TIME, SEC — whole path in N seconds" Foreground="#C9CCEF" FontSize="11" Visibility="Collapsed"/>
             <Grid Grid.Row="1">
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -704,8 +713,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     </Grid>
 
     <!-- clear -->
-    <Button Name="BtnPathClear" Grid.Row="4" Content="🗑  Clear table" Height="34" Margin="3,0,3,8"
-            Background="#EB6F8E" Foreground="White"/>
+    <!-- (clear = trash icon inside the table, bottom-left) -->
 
     <!-- keyframes table + map/export panel -->
     <TextBlock Grid.Row="6" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
@@ -729,12 +737,25 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTextColumn Header="Pitch" Width="56" Binding="{Binding Pitch}" IsReadOnly="True"/>
         <DataGridTextColumn Header="FOV" Width="48" Binding="{Binding FOV}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
+        <DataGridTemplateColumn Width="36">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate>
+              <Button Content="🗑" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
+                      Background="Transparent" Foreground="#EB6F8E" HorizontalAlignment="Center" Padding="2,0"
+                      Visibility="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
       </DataGrid.Columns>
     </DataGrid>
       <Button Name="BtnRefresh" Content="⟳" Width="30" Height="30" FontSize="15" FontWeight="Bold"
               HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,8,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
               BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Full table resync (full memory scan)"/>
+      <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
+              HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
+              Background="#EB6F8E" Foreground="White"
+              BorderThickness="0" Opacity="0.9" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)"/>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
         <TextBlock Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
@@ -747,34 +768,33 @@ function Send-PathSaveAndSync([string]$prefix) {
     </Grid>
 
     <!-- table actions -->
-    <UniformGrid Grid.Row="8" Columns="3" Margin="3,0,3,6">
+    <UniformGrid Grid.Row="8" Columns="2" Margin="3,0,3,6">
       <Button Name="BtnInsert" Content="➕  Insert after selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"/>
-      <Button Name="BtnDel" Content="🗑  Delete selected key" Height="34" Margin="3" Background="#EB6F8E" Foreground="White"/>
     </UniformGrid>
 
-    <!-- parameters row -->
+    <!-- parameters: two rows (FOV / Fly speed), each with per-key and all-keys apply -->
     <Grid Grid.Row="9" Margin="3,0,3,6">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="*"/>
-      </Grid.ColumnDefinitions>
-      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <StackPanel Grid.Row="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,4">
         <TextBlock Text="📷 FOV" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
         <TextBox Name="TbFov" Text="90" Width="52" Height="30" FontSize="13"
                  VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
         <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
+        <Button Name="BtnFovKey" Content="FOV → key" Height="30" Margin="10,0,0,0" Background="#6C71C4" Foreground="White"/>
+        <Button Name="BtnFovAll" Content="FOV → ALL" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
       </StackPanel>
-      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+      <StackPanel Grid.Row="1" Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
         <TextBox Name="TbSpeed" Text="500" Width="52" Height="30" FontSize="13"
                  VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
         <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
+        <Button Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
+        <Button Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
       </StackPanel>
-      <Button Name="BtnKeySpeed" Grid.Column="2" Content="⚡ Speed → key" Height="34" Margin="6,0,3,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
-      <Button Name="BtnSpeedAll" Grid.Column="3" Content="🗂 Speed → ALL" Height="34" Margin="3,0,3,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
     </Grid>
 
     <!-- status + transparency -->
@@ -797,7 +817,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','BtnDel','TbFov','BtnSetFov','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
+foreach ($name in @('BtnHudHide','BtnHudShow','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnTheme','ImgOwl','BtnClose','TbStatus')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -863,13 +883,19 @@ $controls['BtnGoto'].Add_Click({
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
     else { Set-Status "select a keyframe row first" }
 })
-$controls['BtnDel'].Add_Click({
-    $sel = $controls['DgKeys'].SelectedItem
-    if ( $sel -ne $null ) {
-        $st = Send-GameCommand "PathDel $($sel.Num)"
-        Send-PathSaveAndSync $st
-    } else { Set-Status "select a keyframe row first" }
-})
+# удаление строки: корзина появляется на выбранной строке (routed click от любых кнопок внутри таблицы)
+$delHandler = [System.Windows.RoutedEventHandler]{
+    param($s, $e)
+    $b = $e.OriginalSource
+    if ( $b -is [System.Windows.Controls.Button] -and $b.Tag -ne $null ) {
+        try {
+            $idx = [int]$b.Tag
+            $st = Send-GameCommand "PathDel $idx"
+            Send-PathSaveAndSync $st
+        } catch { }
+    }
+}
+$controls['DgKeys'].AddHandler([System.Windows.Controls.Button]::ClickEvent, $delHandler)
 # FOV / Fly speed: зелёный фон = значение применено к игре, серый = редактируется (Set доступен только тогда)
 $script:FovApplied = "90"
 $script:SpeedApplied = "500"
@@ -891,6 +917,21 @@ $controls['BtnSetFov'].Add_Click({
     $script:FovApplied = $fov
     Update-ParamBox "fov"
     Set-Status (Send-GameCommand "Cam_FOV $fov")
+})
+$controls['BtnFovKey'].Add_Click({
+    $sel = $controls['DgKeys'].SelectedItem
+    $fov = $controls['TbFov'].Text.Trim()
+    if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
+    if ( $sel -ne $null ) {
+        $st = Send-GameCommand "PathSetKeyFov $($sel.Num) $fov"
+        Send-PathSaveAndSync $st
+    } else { Set-Status "select a keyframe row first" }
+})
+$controls['BtnFovAll'].Add_Click({
+    $fov = $controls['TbFov'].Text.Trim()
+    if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
+    $st = Send-GameCommand "PathSetAllFov $fov"
+    Sync-AfterCommand $st
 })
 $controls['BtnSpeed'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
@@ -1034,6 +1075,7 @@ $script:DarkTheme = $true
 $script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB" }
 $script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285" }
 function Set-Theme([bool]$dark) {
+    $script:DarkTheme = $dark   # фикс: без этого оба клика вычисляли одну и ту же цель
     $map = $script:DarkBrushes
     if ( -not $dark ) { $map = $script:LightBrushes }
     foreach ( $k in $map.Keys ) {
