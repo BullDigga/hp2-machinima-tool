@@ -1565,14 +1565,22 @@ $script:UiTimer.Add_Tick({
         $script:SpinTransform.Angle = $script:SpinAngle
     }
     if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
-    # v5.15: периодическая проверка "игра ещё на карте?" - ловит выход из игры без кликов
-    $script:GamePoll = ($script:GamePoll + 1) % 20
-    if ( $script:GamePoll -eq 0 -and $script:CurrentMap -ne "" ) {
-        if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
-            $script:CurrentMap = ""
-            if ( $script:Playing ) { Set-Playing $false }
-            Update-SelectionButtons
-            Set-Status "game closed"
+    # v5.15.1: состояние игры опрашиваем раз в ~5.4с:
+    # - игра вышла -> сброс карты/плей-состояния и лочка
+    # - игра есть, уровень не определён -> полный рескан ловит MAP-событие уровня и разблокирует UI
+    #   (иначе дедлок: кнопки заблокированы - синк сам не запустится)
+    $script:GamePoll = ($script:GamePoll + 1) % 60
+    if ( $script:GamePoll -eq 0 -and -not $script:SyncBusy ) {
+        $g = Get-Process Game -ErrorAction SilentlyContinue
+        if ( $g -eq $null ) {
+            if ( $script:CurrentMap -ne "" -or $script:Playing ) {
+                $script:CurrentMap = ""
+                if ( $script:Playing ) { Set-Playing $false }
+                Update-SelectionButtons
+                Set-Status "game closed"
+            }
+        } elseif ( $script:CurrentMap -eq "" ) {
+            Sync-FromLog -Force
         }
     }
 })
