@@ -1,4 +1,4 @@
-# HP2 Machinima Panel v3 - global hotkeys + always-on-top panel
+﻿# HP2 Machinima Panel v3 - global hotkeys + always-on-top panel
 # Hotkeys work WHILE THE GAME IS FOCUSED (no focus switching needed):
 #   F8  = PathAdd        F9 = PathPlay (seconds box)
 #   F10 = PathStop       F11 = SaveIni (persist + panel table refresh)
@@ -521,7 +521,7 @@ function Send-PathSaveAndSync([string]$prefix) {
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="HP2 Machinima Panel" Width="640" SizeToContent="Height"
+        Title="HP2 Machinima Panel" Width="720" SizeToContent="Height"
         Topmost="True" Background="#F21E1E2E" WindowStyle="None" AllowsTransparency="True"
         ResizeMode="NoResize" WindowStartupLocation="Manual" Left="20" Top="60"
         FontFamily="Segoe UI">
@@ -596,16 +596,16 @@ function Send-PathSaveAndSync([string]$prefix) {
       </StackPanel>
       <UniformGrid Grid.Column="1" Columns="4" VerticalAlignment="Center" Margin="0,0,10,0">
         <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="#A6ADC8" Text="кадр"/></TextBlock>
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Foreground="#A6ADC8" Text="  кадр"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="#A6ADC8" Text="play"/></TextBlock>
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Foreground="#A6ADC8" Text="  play"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Foreground="#A6ADC8" Text="stop"/></TextBlock>
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Foreground="#A6ADC8" Text="  stop"/></TextBlock>
         </Border>
         <Border CornerRadius="6" Background="#313244" Margin="2,0" Padding="8,4">
-          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="#A6ADC8" Text="clear"/></TextBlock>
+          <TextBlock Foreground="#CDD6F4" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Foreground="#A6ADC8" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
       <Button Name="BtnClose" Grid.Column="2" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
@@ -677,22 +677,28 @@ function Send-PathSaveAndSync([string]$prefix) {
     </UniformGrid>
 
     <!-- parameters row -->
-    <UniformGrid Grid.Row="9" Columns="4" Margin="3,0,3,6">
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+    <Grid Grid.Row="9" Margin="3,0,3,6">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
         <TextBlock Text="📷 FOV" Foreground="#CDD6F4" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
         <TextBox Name="TbFov" Text="90" Width="52" Height="30" FontSize="13"
                  VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
         <Button Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
       </StackPanel>
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
         <TextBlock Text="✈ Fly speed" Foreground="#CDD6F4" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
         <TextBox Name="TbSpeed" Text="500" Width="52" Height="30" FontSize="13"
                  VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#313244" Foreground="#CDD6F4"/>
         <Button Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White"/>
       </StackPanel>
-      <Button Name="BtnKeySpeed" Content="⚡ Speed → key" Height="34" Margin="3" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
-      <Button Name="BtnSpeedAll" Content="🗂 Speed → ALL keyframes" Height="34" Margin="3" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
-    </UniformGrid>
+      <Button Name="BtnKeySpeed" Grid.Column="2" Content="⚡ Speed → key" Height="34" Margin="6,0,3,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold"/>
+      <Button Name="BtnSpeedAll" Grid.Column="3" Content="🗂 Speed → ALL" Height="34" Margin="3,0,3,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold"/>
+    </Grid>
 
     <!-- status + transparency -->
     <Grid Grid.Row="10" Margin="3,2,3,0">
