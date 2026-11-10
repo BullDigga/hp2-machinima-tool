@@ -973,7 +973,10 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Setter Property="ClipToBounds" Value="False"/>
     </Style>
   </Window.Resources>
-  <Grid Margin="12">
+  <!-- v5.17.11.2: AdornerDecorator обязателен - в окне из XamlReader БЕЗ него
+       GetAdornerLayer возвращает null и адорнер верхней половины плюса не живёт -->
+  <AdornerDecorator>
+  <Grid Name="RootGrid" Margin="12">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
@@ -1197,12 +1200,20 @@ function Send-PathSaveAndSync([string]$prefix) {
                      Клик = вставить ТЕКУЩИЙ кадр камеры на позицию Num (между k-1 и k);
                      у строки 0 это вставка в начало пути. delHandler шлёт PathInsertAt Num -->
                 <!-- видны, пока курсор где-либо над таблицей (IsMouseOver грида) -->
-                <Button Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
+                <Button x:Name="PillBtn" Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
                         Width="16" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
                         Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Top"
                         Margin="22,-6,0,0" ToolTip="insert CURRENT camera keyframe here (between this and the previous row)"
                         Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource BoolToVis}}"/>
+                <!-- у строки 0 глиф "+" рисует АДОРНЕР (верхняя половина пилюли лежит НА
+                     шапке, кнопка клипуется вьюпортом) - глушим глиф кнопки, Content="+"
+                     нужен роутеру кликов -->
               </Grid>
+              <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Num}" Value="0">
+                  <Setter TargetName="PillBtn" Property="Foreground" Value="Transparent"/>
+                </DataTrigger>
+              </DataTemplate.Triggers>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
@@ -1293,6 +1304,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                 FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
     </Grid>
   </Grid>
+  </AdornerDecorator>
 </Window>
 "@
 
@@ -1510,6 +1522,111 @@ $delHandler = [System.Windows.RoutedEventHandler]{
     }
 }
 $controls['DgKeys'].AddHandler([System.Windows.Controls.Button]::ClickEvent, $delHandler)
+
+# ---------- v5.17.11.2: верхняя половина плюса стыка "шапка / строка 0" ----------
+# Плюс строки 0 вылезает на -6px выше верхней кромки таблицы, а ScrollContentPresenter
+# клипует всё, что выше content-top -> у стыка шапка/строка-0 видна только нижняя
+# половина пилюли (юзер: "дорисовывай на шапке оставшуюся половину"). Хедер-костыль
+# (вторая кнопка в HeaderTemplate) отвергнут - у шапки свой padding, половинки не
+# сошлись. РЕШЕНИЕ: AdornerLayer - адорнер рисуется ПОВЕРХ всего дерева окна и не
+# клипается вьюпортом. Рисуем ПОЛНЫЙ эллипс на позиции центра плюса строки 0 (низ
+# совпадает с нижней половиной 1:1, тот же цвет), а "+" глиф - ТОЛЬКО верхнюю
+# половину (PushClip), нижнюю рисует сама кнопка строки. IsHitTestVisible=false:
+# клик ловит кнопка строки 0 (вставка в начало пути). Позиция = TranslatePoint
+# строки 0 в координаты DataGrid, пересчёт на LayoutUpdated / MouseEnter/Leave /
+# ScrollChanged (скролл не поднимает LayoutUpdated).
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Windows;
+using System.Windows.Documents;
+using System.Windows.Media;
+namespace HP2 {
+public class TopHalfPillAdorner : Adorner {
+    public double PillX = -100; public double PillY = -100; public bool Show = false;
+    static readonly Brush _b = new SolidColorBrush(Color.FromArgb(0xE0, 0x2F, 0x9E, 0x44));
+    public TopHalfPillAdorner(UIElement el) : base(el) { IsHitTestVisible = false; }
+    protected override void OnRender(DrawingContext dc) {
+        if (!Show) return;
+        double rx = 8.0, ry = 6.0;
+        dc.DrawEllipse(_b, null, new Point(PillX, PillY), rx, ry);
+        // "+" целиком из адорнера: пол-глифа от кнопки + пол-глифа от FormattedText
+        // не совпали по метрикам шрифта (визуально "маленький плюс"). Глиф кнопки
+        // строки 0 погашен триггером Num=0 (Foreground=Transparent), Content="+"
+        // остался для роутера кликов
+        FormattedText ft = new FormattedText("+", System.Globalization.CultureInfo.InvariantCulture,
+            FlowDirection.LeftToRight,
+            new Typeface(new FontFamily("Consolas"), FontStyles.Normal, FontWeights.Bold, FontStretches.Normal),
+            10, Brushes.White, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+        dc.DrawText(ft, new Point(PillX - ft.Width/2, PillY - ft.Height/2));
+    }
+}
+}
+"@ -ReferencedAssemblies @('PresentationCore','PresentationFramework','WindowsBase','System.Xaml')
+} catch { }
+
+try {
+    # ВАЖНО: адорним КОРНЕВОЙ грид, а не сам DgKeys! Слой адорнеров в этом окне
+    # размещает адорнер в (0,0) координат декоратора, игнорируя смещение adorned-
+    # элемента (живой тест: эллипс для DgKeys лег в левый верхний угол окна).
+    # Корневой грид стоит в (0,0), поэтому рисуем сразу в его координатах.
+    $script:RootGrid = $window.FindName('RootGrid')
+    $script:PillAdorner = New-Object HP2.TopHalfPillAdorner($script:RootGrid)
+    $adLayer = [System.Windows.Documents.AdornerLayer]::GetAdornerLayer($script:RootGrid)
+    if ( $adLayer -ne $null ) { $adLayer.Add([System.Windows.Documents.Adorner]$script:PillAdorner) | Out-Null }
+} catch { }
+
+function Update-PillAdorner {
+    try {
+        $a = $script:PillAdorner
+        if ( $a -eq $null ) { return }
+        $dg = $controls['DgKeys']
+        $row0 = $null
+        try { $row0 = $dg.ItemContainerGenerator.ContainerFromIndex(0) } catch { }
+        # позиция кэшируется: при пересборке таблицы ContainerFromIndex(0) МОЖЕТ
+        # временно вернуть null - если бы Show зависел от удачного lookup, плюс
+        # навсегда оставался бы скрыт до следующего LayoutUpdated
+        if ( $row0 -ne $null -and $script:PillAdorner.Parent -ne $null ) {
+            # координаты в пространстве AdornerLayer: слой покрывает декоратор ЦЕЛИКОМ
+            # (включая Margin грида), поэтому TranslatePoint именно к слою - иначе
+            # эллипс уезжает на 12 WPF (маргин) вверх-влево
+            $p = $row0.TranslatePoint([System.Windows.Point]::new(0,0), $script:PillAdorner.Parent)
+            $script:PillAX = $p.X + 30   # центр пилюли: Margin 22 слева + половина ширины 16
+            $script:PillAY = $p.Y        # верх строки 0 = стык с шапкой
+        }
+        if ( $script:PillAX -gt 0 -and $dg.Items.Count -gt 0 -and $dg.IsMouseOver ) {
+            $a.PillX = $script:PillAX
+            $a.PillY = $script:PillAY
+            $a.Show = $true
+        } else {
+            $a.Show = $false
+        }
+        $a.InvalidateVisual()
+    } catch { }
+}
+$controls['DgKeys'].Add_LayoutUpdated({ Update-PillAdorner })
+$controls['DgKeys'].Add_MouseEnter({ Update-PillAdorner })
+$controls['DgKeys'].Add_MouseLeave({ Update-PillAdorner })
+
+# скролл не поднимает LayoutUpdated - вешаем ScrollChanged на ScrollViewer грида,
+# когда он появится в визуальном дереве (после Loaded)
+$window.Add_Loaded({
+    try {
+        $script:DgScrollViewer = Find-VisualChildOfType $controls['DgKeys'] ([System.Windows.Controls.ScrollViewer])
+        if ( $script:DgScrollViewer -ne $null ) { $script:DgScrollViewer.Add_ScrollChanged({ Update-PillAdorner }) }
+    } catch { }
+})
+
+function Find-VisualChildOfType($el, $t) {
+    $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($el)
+    for ( $i = 0; $i -lt $n; $i++ ) {
+        $c = [System.Windows.Media.VisualTreeHelper]::GetChild($el, $i)
+        if ( $c -is $t ) { return $c }
+        $r = Find-VisualChildOfType $c $t
+        if ( $r -ne $null ) { return $r }
+    }
+    return $null
+}
 # FOV / Fly speed: зелёный фон = значение применено к игре, серый = редактируется (Set доступен только тогда)
 $script:FovApplied = "90"
 $script:SpeedApplied = "500"
