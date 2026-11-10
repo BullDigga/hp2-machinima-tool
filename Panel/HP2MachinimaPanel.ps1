@@ -1487,22 +1487,7 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                 # v5.17.11: плюсик сидит РОВНО НА СТЫКЕ над строкой N (верхняя граница
                 # её ячейки) = между строками N-1 и N: вставляем ТЕКУЩИЙ кадр камеры на
                 # позицию N. У строки 0 это вставка в начало пути.
-                $idx = [int]$tag
-                if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
-                    Set-Status "game is not running - cannot insert"; return
-                }
-                # v5.17.8: вставленный кадр получает время постановки (как F8/импорт) -
-                # без этого у вставленных кадров навсегда оставалось "-"
-                $script:StampNextSync = $true
-                # v5.17.11.1: PathInsertAt берёт FOV/скорость из ТЕКУЩЕГО состояния ИГРЫ
-                # (PlayerHarry.FovAngle / CurrentSet.fMoveSpeed в BaseCam), а юзеру нужно
-                # то, что активно в ПАНЕЛИ (зелёные значения боксов). Досылаем новому
-                # кадру (он на позиции idx) активные значения панели
-                $cmds = @("PathInsertAt $idx",
-                          "FovIdx $idx", "FovVal $($script:FovApplied)", "FovApply",
-                          "SpeedIdx $idx", "SpeedVal $($script:SpeedApplied)", "SpeedApply")
-                $st = Send-GameCommands $cmds
-                Sync-AfterCommand "insert at #$idx | $st"
+                Insert-KeyframeAt ([int]$tag)
                 return
             }
             $idx = [int]$tag
@@ -1522,6 +1507,20 @@ $delHandler = [System.Windows.RoutedEventHandler]{
     }
 }
 $controls['DgKeys'].AddHandler([System.Windows.Controls.Button]::ClickEvent, $delHandler)
+
+# v5.17.11.2: общая вставка ТЕКУЩЕГО кадра на позицию idx (между idx-1 и idx);
+# новый кадр получает время постановки + активные значения FOV/скорости панели
+function Insert-KeyframeAt([int]$idx) {
+    if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+        Set-Status "game is not running - cannot insert"; return
+    }
+    $script:StampNextSync = $true
+    $cmds = @("PathInsertAt $idx",
+              "FovIdx $idx", "FovVal $($script:FovApplied)", "FovApply",
+              "SpeedIdx $idx", "SpeedVal $($script:SpeedApplied)", "SpeedApply")
+    $st = Send-GameCommands $cmds
+    Sync-AfterCommand "insert at #$idx | $st"
+}
 
 # ---------- v5.17.11.2: верхняя половина плюса стыка "шапка / строка 0" ----------
 # Плюс строки 0 вылезает на -6px выше верхней кромки таблицы, а ScrollContentPresenter
@@ -1548,12 +1547,9 @@ public class TopHalfPillAdorner : Adorner {
     public TopHalfPillAdorner(UIElement el) : base(el) { IsHitTestVisible = false; }
     protected override void OnRender(DrawingContext dc) {
         if (!Show) return;
-        double rx = 8.0, ry = 6.0;
-        dc.DrawEllipse(_b, null, new Point(PillX, PillY), rx, ry);
-        // "+" целиком из адорнера: пол-глифа от кнопки + пол-глифа от FormattedText
-        // не совпали по метрикам шрифта (визуально "маленький плюс"). Глиф кнопки
-        // строки 0 погашен триггером Num=0 (Foreground=Transparent), Content="+"
-        // остался для роутера кликов
+        dc.DrawEllipse(_b, null, new Point(PillX, PillY), 8.0, 6.0);
+        // "+" целиком из адорнера (глиф кнопки строки 0 погашен триггером Num=0):
+        // пол-глифа от кнопки + пол-глифа от FormattedText не совпали бы по метрикам
         FormattedText ft = new FormattedText("+", System.Globalization.CultureInfo.InvariantCulture,
             FlowDirection.LeftToRight,
             new Typeface(new FontFamily("Consolas"), FontStyles.Normal, FontWeights.Bold, FontStretches.Normal),
@@ -1607,6 +1603,27 @@ function Update-PillAdorner {
 $controls['DgKeys'].Add_LayoutUpdated({ Update-PillAdorner })
 $controls['DgKeys'].Add_MouseEnter({ Update-PillAdorner })
 $controls['DgKeys'].Add_MouseLeave({ Update-PillAdorner })
+
+# КЛИК по верхней половине плюса (лежит НА шапке): слой адорнеров в этом окружении
+# НЕ УЧАСТВУЕТ в hit-test (изолированный тест: InputHitTest в точке кнопки адорнера
+# возвращает содержимое под ним, кнопка клика не получает). Ловим PreviewMouseDown
+# на уровне окна: если клик попал в рект ВЕРХНЕЙ половины пилюли (в координатах
+# слоя) и таблица под курсором - вставка в НАЧАЛО пути. Нижняя половина кликается
+# обычной кнопкой строки 0 (roутер delHandler).
+$window.Add_PreviewMouseLeftButtonDown({
+    param($s, $e)
+    try {
+        if ( $script:PillAdorner -eq $null -or $script:PillAX -le 0 ) { return }
+        $dg = $controls['DgKeys']
+        if ( -not $dg.IsMouseOver ) { return }
+        $pt = $e.GetPosition($script:PillAdorner.Parent)
+        if ( $pt.X -ge ($script:PillAX - 8) -and $pt.X -le ($script:PillAX + 8) -and
+             $pt.Y -ge ($script:PillAY - 6) -and $pt.Y -le $script:PillAY ) {
+            Insert-KeyframeAt 0
+            $e.Handled = $true
+        }
+    } catch { }
+})
 
 # скролл не поднимает LayoutUpdated - вешаем ScrollChanged на ScrollViewer грида,
 # когда он появится в визуальном дереве (после Loaded)
