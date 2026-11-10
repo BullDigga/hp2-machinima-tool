@@ -1231,7 +1231,7 @@ function Send-PathSaveAndSync([string]$prefix) {
               <!-- v5.17.11.5: значок-метка "перейти к кадру" (вместо кнопки под таблицей):
                    появляется при наведении на строку, слева от корзины. Клик = PathGoto Num -->
               <Button Content="📍" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
-                      Background="Transparent" Foreground="#89DCEB" HorizontalAlignment="Center" Padding="2,0"
+                      Background="Transparent" Foreground="#2196F3" HorizontalAlignment="Center" Padding="2,0"
                       Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
