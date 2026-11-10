@@ -1225,6 +1225,17 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTextColumn Header="Pitch" Width="56" Binding="{Binding Pitch}" IsReadOnly="True"/>
         <DataGridTextColumn Header="FOV" Width="48" Binding="{Binding FOV}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
+        <DataGridTemplateColumn Width="30">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate>
+              <!-- v5.17.11.5: значок-метка "перейти к кадру" (вместо кнопки под таблицей):
+                   появляется при наведении на строку, слева от корзины. Клик = PathGoto Num -->
+              <Button Content="📍" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
+                      Background="Transparent" Foreground="#89DCEB" HorizontalAlignment="Center" Padding="2,0"
+                      Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
         <DataGridTemplateColumn Width="36">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
@@ -1259,10 +1270,8 @@ function Send-PathSaveAndSync([string]$prefix) {
       </StackPanel>
     </Grid>
 
-    <!-- table actions (v5.17.8: "Add after selected" заменён зелёными "+" на стыках строк) -->
-    <UniformGrid Grid.Row="8" Columns="1" Margin="3,0,3,6">
-      <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}" ToolTipService.ShowOnDisabled="True"/>
-    </UniformGrid>
+    <!-- v5.17.11.5: кнопка "Go to selected" убрана - переход к кадру теперь значком-меткой
+         на самой строке (см. колонку перед корзиной) -->
 
     <!-- parameters: two rows (FOV / Fly speed) on shared columns, so key/ALL buttons align by X -->
     <Grid Grid.Row="9" Margin="3,0,3,6">
@@ -1312,7 +1321,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1466,14 +1475,9 @@ $controls['BtnRefresh'].Add_Click({
 # v5.17.8-pivot-история: overlay-Canvas в гриде упорно не рендерился (layout-лог
 # идеальный, зелёных пикселей 0) - шаблонные кнопки в ячейках рендерятся надёжно.
 # Клик ловится routed-хендлером Button.Click ниже: Content=="+" -> PathInsertAt Num.
-$controls['BtnGoto'].Add_Click({
-    $sel = $controls['DgKeys'].SelectedItem
-    if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
-    else { Set-Status "select a keyframe row first" }
-})
 # удаление строки (корзина по наведению) + v5.17.8: вставка зелёным "+" на стыке строк.
-# Обе ловятся routed-хендлером Button.Click внутри таблицы: тег корзины = число (индекс
-# для PathDel), тег плюсика = "ins:N" (PathInsertAt N - захватывает ТЕКУЩУЮ камеру)
+# Все ловятся routed-хендлером Button.Click внутри таблицы: тег корзины/метки = число
+# (индекс для PathDel/PathGoto), тег плюсика = Num (PathInsertAt N - ТЕКУЩАЯ камера)
 $delHandler = [System.Windows.RoutedEventHandler]{
     param($s, $e)
     $b = $e.OriginalSource
@@ -1488,6 +1492,20 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                 # её ячейки) = между строками N-1 и N: вставляем ТЕКУЩИЙ кадр камеры на
                 # позицию N. У строки 0 это вставка в начало пути.
                 Insert-KeyframeAt ([int]$tag)
+                return
+            }
+            if ( [string]$b.Content -eq "📍" ) {
+                # v5.17.11.5: метка на строке = переход камеры к кадру N (бывший BtnGoto)
+                if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+                    Set-Status "game is not running - cannot goto"; return
+                }
+                # v5.14: кадры с другой карты - переходить нельзя
+                if ( $script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap ) {
+                    $L = $script:LocData[$script:Lang]
+                    Set-Status $L.TipWrongMap
+                    return
+                }
+                Set-Status (Send-GameCommand "PathGoto $([int]$tag)")
                 return
             }
             $idx = [int]$tag
@@ -1976,13 +1994,13 @@ function Set-Theme([bool]$dark) {
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
 # ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
-$script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnGoto')
+$script:SelDep = @('BtnFovKey','BtnKeySpeed')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','BtnRefresh','TbFov','TbSpeed')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','BtnRefresh','TbFov','TbSpeed')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
-$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
+$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 function Update-SelectionButtons {
     # v5.15: игра не на карте (закрыта или меню) - доступна только Прозрачность и поле
     # секунд; таблица с кадрами остаётся живой ради оффлайн-удаления
@@ -2181,7 +2199,7 @@ $script:LocData = @{
         Keyframes = "▦ KEYFRAMES (double-click = go to key)"
         NoMap = "(no map)"; Map = "🗺 MAP"
         Export = "↗  Export to file"; Import = "↙  Import from file"
-        Insert = "➕  Add keyframe after selected key"; Goto = "📍  Go to selected key"
+        Insert = "➕  Add keyframe after selected key"
         Fov = "📷 FOV"; FlySpeed = "✈ Fly speed"
         SetFov = "Set FOV"; FovKey = "🎯 FOV → key"; FovAll = "🌐 FOV → ALL"
         SetSpeed = "Set fly speed"; SpeedKey = "⚡ Speed → key"; SpeedAll = "🗂 Speed → ALL"
@@ -2205,7 +2223,7 @@ $script:LocData = @{
         Keyframes = "▦ КАДРЫ (двойной клик = перейти к кадру)"
         NoMap = "(нет карты)"; Map = "🗺 КАРТА"
         Export = "↗  Экспорт в файл"; Import = "↙  Импорт из файла"
-        Insert = "➕  Добавить кадр после выбранного"; Goto = "📍  Перейти к выбранному кадру"
+        Insert = "➕  Добавить кадр после выбранного"
         Fov = "📷 FOV"; FlySpeed = "✈ Скорость полёта"
         SetFov = "Задать FOV"; FovKey = "🎯 FOV → кадр"; FovAll = "🌐 FOV → ВСЕ"
         SetSpeed = "Задать скорость"; SpeedKey = "⚡ Скор. → кадр"; SpeedAll = "🗂 Скор. → ВСЕ"
@@ -2233,7 +2251,6 @@ function Set-Lang([string]$lang) {
     if ( -not $script:Playing ) { $controls['BtnPathStop'].Content = $L.Stop }
     $controls['BtnExport'].Content = $L.Export
     $controls['BtnImport'].Content = $L.Import
-    $controls['BtnGoto'].Content = $L.Goto
     $controls['BtnSetFov'].Content = $L.SetFov
     $controls['BtnFovKey'].Content = $L.FovKey
     $controls['BtnFovAll'].Content = $L.FovAll
@@ -2251,7 +2268,7 @@ function Set-Lang([string]$lang) {
     $controls['TxFlySpeed'].Text = $L.FlySpeed
     $controls['TbMap'].Text = Get-MapText
     # подсказки на серых кнопках
-    foreach ( $b in @('BtnFovKey','BtnKeySpeed','BtnGoto') ) { $controls[$b].ToolTip = $L.TipSelect }
+    foreach ( $b in @('BtnFovKey','BtnKeySpeed') ) { $controls[$b].ToolTip = $L.TipSelect }
     foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
     $controls['FlagRU'].Visibility = if ( $lang -eq "ru" ) { "Visible" } else { "Collapsed" }
