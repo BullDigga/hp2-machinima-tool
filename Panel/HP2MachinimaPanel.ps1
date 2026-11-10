@@ -318,12 +318,36 @@ function Send-GameCommands([string[]]$cmds) {
         [GameCtl]::Tap([uint16]$VK['grave'])
         [GameCtl]::KeyUp([uint16]0x10)
         Wait-Pump 120
+        # v5.17.8: прогресс [i/N] с бегущими точками + проверка фокуса ПЕРЕД КАЖДОЙ командой.
+        # Alt-Tab во время пачки (импорт) печатал остаток команд в ЧУЖОЕ окно, а консоль игры
+        # оставалась открытой (чёрный экран). Теперь: фокус потерян -> один тихий рефокус,
+        # не вышло -> чистый ABORT (ничего не печатаем дальше), пользователь видит [i/N].
+        $ci = 0
+        $res = ""
         foreach ($c in $cmds) {
+            $dots = "." * (1 + ($ci % 3))
+            Set-Status ("typing [$($ci+1)/$($cmds.Count)] $c $dots") "warn"
+            if ( [GameCtl]::GetForegroundWindow() -ne $h -and -not (Focus-GameWindow $h) ) {
+                $res = "ABORTED at [$($ci+1)/$($cmds.Count)] - focus lost! unfinished text may have gone to another window; press `` in game to close the console"
+                break
+            }
             Type-Command $c
             [GameCtl]::Tap([uint16]$VK['enter'])
             Wait-Pump 260
+            $ci++
         }
-        [GameCtl]::Tap([uint16]$VK['grave'])
+        if ( $res -ne "" ) {
+            # рефокус не удался: В ИГРУ НЕ ТЫКАЕМ (клавиши ушли бы в чужое окно) - только стоп
+            Stop-Spin
+            Set-Status $res "warn"
+            return $res
+        }
+        # v5.17.8: консоль закрывает ИГРА изнутри по команде-маркеру PathPing (см. HPConsole).
+        # Старый финальный grave-тап был тогглом: человеческий ` во время печати инвертировал
+        # состояние консоли, и следующая пачка уходила в геймплей.
+        Type-Command "PathPing"
+        [GameCtl]::Tap([uint16]$VK['enter'])
+        Wait-Pump 260
         Wait-Pump 80
         # одиночные команды без последующего синка: гасим спиннер сами (синк делает это раньше, если запущен)
         $script:SpinStopTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -1112,9 +1136,30 @@ function Send-PathSaveAndSync([string]$prefix) {
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
-              AlternatingRowBackground="{DynamicResource AltRowBrush}" RowHeight="26">
+              AlternatingRowBackground="{DynamicResource AltRowBrush}" RowHeight="26"
+              EnableRowVirtualization="False">
       <DataGrid.Columns>
-        <DataGridTextColumn Header="#" Width="30" Binding="{Binding Num}" IsReadOnly="True"/>
+        <DataGridTemplateColumn Header="#" Width="30">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate>
+              <Grid Background="Transparent">
+                <TextBlock Text="{Binding Num}" Margin="4,0,0,0" VerticalAlignment="Center" HorizontalAlignment="Left" FontFamily="Consolas"/>
+                <!-- v5.17.8: зелёный "+" на НИЖНЕЙ кромке ячейки # - визуально сидит НА стыке
+                     этой и следующей строки (граница row k / row k+1), ВНУТРИ ячейки.
+                     Отрицательный margin (вылаз на -7px вверх) НЕ РАБОТАЕТ: DataGridCell
+                     обрезает контент (проверено: кнопки Visible, но IsOffscreen, 0 зелёных
+                     пикселей). Клик = вставить ТЕКУЩИЙ кадр камеры между k и k+1 ->
+                     delHandler шлёт PathInsertAt (Num+1) -->
+                <!-- видны, пока курсор где-либо над таблицей (IsMouseOver грида) -->
+                <Button Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
+                        Width="18" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
+                        Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                        Margin="2,0,0,0" ToolTip="insert CURRENT camera keyframe AFTER this row"
+                        Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource BoolToVis}}"/>
+              </Grid>
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
         <DataGridTextColumn Header="Time" Width="66" Binding="{Binding Time}" IsReadOnly="True"/>
         <DataGridTextColumn Header="X" Width="64" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Y" Width="64" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
@@ -1128,7 +1173,7 @@ function Send-PathSaveAndSync([string]$prefix) {
             <DataTemplate>
               <Button Content="🗑" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
                       Background="Transparent" Foreground="#EB6F8E" HorizontalAlignment="Center" Padding="2,0"
-                      Visibility="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+                      Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
@@ -1157,9 +1202,8 @@ function Send-PathSaveAndSync([string]$prefix) {
       </StackPanel>
     </Grid>
 
-    <!-- table actions -->
-    <UniformGrid Grid.Row="8" Columns="2" Margin="3,0,3,6">
-      <Button Name="BtnInsert" Content="➕  Add keyframe after selected key" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
+    <!-- table actions (v5.17.8: "Add after selected" заменён зелёными "+" на стыках строк) -->
+    <UniformGrid Grid.Row="8" Columns="1" Margin="3,0,3,6">
       <Button Name="BtnGoto" Content="📍  Go to selected" Height="34" Margin="3" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}" ToolTipService.ShowOnDisabled="True"/>
     </UniformGrid>
 
@@ -1210,7 +1254,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnInsert','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1355,30 +1399,47 @@ $controls['BtnRefresh'].Add_Click({
     if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) { Send-GameCommand "PathDumpKeys" | Out-Null }
     Sync-FromLog -Force
 })
-# вставить кадр ПОСЛЕ выбранного (захватывает текущую позицию камеры); без выбора - в конец
-$controls['BtnInsert'].Add_Click({
-    $sel = $controls['DgKeys'].SelectedItem
-    if ( $sel -ne $null ) {
-        $st = Send-GameCommand "PathInsertAt $($sel.Num)"
-        $st = "insert after #$($sel.Num) | " + $st
-    } else {
-        $st = Send-GameCommand "PathInsertAt 999999"
-        $st = "insert at end | " + $st
-    }
-    Sync-AfterCommand $st
-})
+# ---------- v5.17.8: зелёные "+" на стыках строк ----------
+# ПЛЮСИКИ ЖИВУТ В ШАБЛОНЕ КОЛОНКИ # (см. XAML): кнопка вылезает на -7px над верхней
+# границей строки = ровно стык с предыдущей, видна когда курсор где-либо над таблицей
+# (IsMouseOver грида). ПЕРВАЯ строка (Num=0) - исключение: её стык-сверху не существует
+# (над ней хедер), кнопка там не имеет смысла и скрыта триггером по Num=0 ниже.
+# ПРИЧИНА ПИВОТА: overlay-Canvas в гриде упорно не рендерился (проверено layout-логом:
+# размеры/offset/IsVisible идеальные, а зелёных пикселей в скриншоте 0, UIA IsOffscreen) -
+# шаблонные кнопки в ячейках при этом рендерятся надёжно (корзина тому proof).
+# Клик ловится routed-хендлером Button.Click ниже по тегу "ins:N" -> PathInsertAt N.
 $controls['BtnGoto'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
     else { Set-Status "select a keyframe row first" }
 })
-# удаление строки: корзина появляется на выбранной строке (routed click от любых кнопок внутри таблицы)
+# удаление строки (корзина по наведению) + v5.17.8: вставка зелёным "+" на стыке строк.
+# Обе ловятся routed-хендлером Button.Click внутри таблицы: тег корзины = число (индекс
+# для PathDel), тег плюсика = "ins:N" (PathInsertAt N - захватывает ТЕКУЩУЮ камеру)
 $delHandler = [System.Windows.RoutedEventHandler]{
     param($s, $e)
     $b = $e.OriginalSource
     if ( $b -is [System.Windows.Controls.Button] -and $b.Tag -ne $null ) {
         try {
-            $idx = [int]$b.Tag
+            $tag = [string]$b.Tag
+            # ВАЖНО: различаем по Content, НЕ по Tag-формату: Tag биндится к Num, а
+            # StringFormat на object-свойстве (Tag) WPF МОЛЧА ИГНОРИРУЕТ - тег всегда
+            # просто число, "ins:N" не получить. Пилюля "+" = Content "+", корзина = "🗑"
+            if ( [string]$b.Content -eq "+" ) {
+                # плюсик на НИЖНЕЙ кромке строки N = стык N/N+1: вставляем ТЕКУЩИЙ кадр
+                # камеры на позицию N+1 (между N и N+1)
+                $idx = [int]$tag + 1
+                if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+                    Set-Status "game is not running - cannot insert"; return
+                }
+                # v5.17.8: вставленный кадр получает время постановки (как F8/импорт) -
+                # без этого у вставленных кадров навсегда оставалось "-"
+                $script:StampNextSync = $true
+                $st = Send-GameCommand "PathInsertAt $idx"
+                Sync-AfterCommand "insert at #$idx | $st"
+                return
+            }
+            $idx = [int]$tag
             # v5.14: игра закрыта - удаляем строку локально
             if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
                 if ( $idx -ge 0 -and $idx -lt $script:KeyRows.Count ) {
@@ -1667,13 +1728,13 @@ function Set-Theme([bool]$dark) {
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
 # ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
-$script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto')
+$script:SelDep = @('BtnFovKey','BtnKeySpeed','BtnGoto')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnInsert','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','BtnRefresh','TbFov','TbSpeed')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','BtnRefresh','TbFov','TbSpeed')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
-$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnInsert','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
+$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnGoto','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 function Update-SelectionButtons {
     # v5.15: игра не на карте (закрыта или меню) - доступна только Прозрачность и поле
     # секунд; таблица с кадрами остаётся живой ради оффлайн-удаления
@@ -1924,7 +1985,6 @@ function Set-Lang([string]$lang) {
     if ( -not $script:Playing ) { $controls['BtnPathStop'].Content = $L.Stop }
     $controls['BtnExport'].Content = $L.Export
     $controls['BtnImport'].Content = $L.Import
-    $controls['BtnInsert'].Content = $L.Insert
     $controls['BtnGoto'].Content = $L.Goto
     $controls['BtnSetFov'].Content = $L.SetFov
     $controls['BtnFovKey'].Content = $L.FovKey
@@ -1943,7 +2003,7 @@ function Set-Lang([string]$lang) {
     $controls['TxFlySpeed'].Text = $L.FlySpeed
     $controls['TbMap'].Text = Get-MapText
     # подсказки на серых кнопках
-    foreach ( $b in @('BtnFovKey','BtnKeySpeed','BtnInsert','BtnGoto') ) { $controls[$b].ToolTip = $L.TipSelect }
+    foreach ( $b in @('BtnFovKey','BtnKeySpeed','BtnGoto') ) { $controls[$b].ToolTip = $L.TipSelect }
     foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
     $controls['FlagRU'].Visibility = if ( $lang -eq "ru" ) { "Visible" } else { "Collapsed" }
