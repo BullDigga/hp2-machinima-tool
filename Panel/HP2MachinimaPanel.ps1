@@ -261,16 +261,24 @@ function Pump-Dispatcher {
     } catch { }
 }
 
+function Wait-Pump([int]$ms) {
+    # v5.17.7: сон кусочками по 10мс с прокачкой dispatcher'а на КАЖДОМ кусочке.
+    # Раньше паузы были цельными Start-Sleep (180/260/600мс) - спиннер начинал
+    # крутиться, но замирал на каждой паузе; теперь кадр отрисовки уходит каждые ~10мс
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ( $sw.ElapsedMilliseconds -lt $ms ) {
+        Start-Sleep -Milliseconds 10
+        Pump-Dispatcher
+    }
+}
+
 function Type-Command([string]$cmd) {
     # unicode-ввод: не зависит от раскладки клавиатуры.
     # v5.17.2: 20мс/символ и 260мс после Enter - при быстрой печати длинных пачек команд
     # (импорт) консоль теряла символы и Enters, значения кадров мутировали
-    $ti = 0
     foreach ($ch in $cmd.ToCharArray()) {
         [GameCtl]::TapChar($ch)
-        Start-Sleep -Milliseconds 20
-        $ti++
-        if ( ($ti % 5) -eq 0 ) { Pump-Dispatcher }
+        Wait-Pump 20   # v5.17.7: пауза с прокачкой отрисовки на КАЖДОМ символе
     }
 }
 
@@ -285,7 +293,7 @@ function Focus-GameWindow([IntPtr]$h) {
     [GameCtl]::ShowWindow($h, 9) | Out-Null
     [GameCtl]::Tap(0x12) | Out-Null
     [GameCtl]::SetForegroundWindow($h) | Out-Null
-    Start-Sleep -Milliseconds 180
+    Wait-Pump 180
     return ([GameCtl]::GetForegroundWindow() -eq $h)
 }
 
@@ -297,6 +305,10 @@ function Send-GameCommands([string[]]$cmds) {
     $script:SendBusy = $true
     try {
         Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
+        # v5.17.7: оранжевый debug-статус СРАЗУ при клике - что и сколько печатаем
+        $dbg = if ( $cmds.Count -gt 0 ) { [string]$cmds[0] } else { "" }
+        if ( $dbg.Length -gt 42 ) { $dbg = $dbg.Substring(0, 42) + "..." }
+        Set-Status ("typing $($cmds.Count) cmd(s): $dbg") "warn"
         $h = Find-GameWindow
         if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
         if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
@@ -305,16 +317,14 @@ function Send-GameCommands([string[]]$cmds) {
         [GameCtl]::KeyDown([uint16]0x10)
         [GameCtl]::Tap([uint16]$VK['grave'])
         [GameCtl]::KeyUp([uint16]0x10)
-        Start-Sleep -Milliseconds 120
-        Pump-Dispatcher
+        Wait-Pump 120
         foreach ($c in $cmds) {
             Type-Command $c
             [GameCtl]::Tap([uint16]$VK['enter'])
-            Start-Sleep -Milliseconds 260
-            Pump-Dispatcher
+            Wait-Pump 260
         }
         [GameCtl]::Tap([uint16]$VK['grave'])
-        Start-Sleep -Milliseconds 80
+        Wait-Pump 80
         # одиночные команды без последующего синка: гасим спиннер сами (синк делает это раньше, если запущен)
         $script:SpinStopTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:SpinStopTimer.Interval = [TimeSpan]::FromMilliseconds(1400)
@@ -768,12 +778,12 @@ function Sync-AfterCommand([string]$status) {
     # v5.17: перед синком запрашиваем у игры СНАПШОТ пути (PathDumpKeys): таблица
     # строится из дампа, а не из уцелевших обрывков кольцевого лог-буфера.
     # v5.17.3: если синк отклонён (SyncBusy от предыдущего) - повторяем до 6 раз
-    Start-Sleep -Milliseconds 120
+    Wait-Pump 120
     Send-GameCommands @("PathDumpKeys") | Out-Null
-    Start-Sleep -Milliseconds 120
+    Wait-Pump 120
     $tries = 0
     while ( -not (Sync-FromLog -Force) -and $tries -lt 6 ) {
-        Start-Sleep -Milliseconds 600
+        Wait-Pump 600
         $tries++
     }
     if ( $status -ne "" ) { Set-Status $status }
@@ -811,6 +821,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="NavBrush" Color="#FF89DCEB"/>
     <SolidColorBrush x:Key="HdrBrush" Color="#FF313244"/>
     <SolidColorBrush x:Key="SelBrush" Color="#FF3D4A66"/>
+    <SolidColorBrush x:Key="StatusWarnBrush" Color="#FFFAB387"/>
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
 
     <Style TargetType="Button">
@@ -1203,8 +1214,14 @@ foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPath
     $controls[$name] = $window.FindName($name)
 }
 
-function Set-Status([string]$s) {
+# v5.17.7: kind="warn" красит статус ОРАНЖЕВЫМ (идёт печать команд в игру),
+# по умолчанию - обычный зелёный
+function Set-Status([string]$s, [string]$kind = "ok") {
+    $script:StatusKind = $kind
     $controls['TbStatus'].Text = $s
+    $sk = "StatusBrush"
+    if ( $kind -eq "warn" ) { $sk = "StatusWarnBrush" }
+    try { $controls['TbStatus'].Foreground = $window.Resources[$sk] } catch { }
 }
 
 function Get-MapText {
@@ -1381,18 +1398,23 @@ $controls['DgKeys'].AddHandler([System.Windows.Controls.Button]::ClickEvent, $de
 # FOV / Fly speed: зелёный фон = значение применено к игре, серый = редактируется (Set доступен только тогда)
 $script:FovApplied = "90"
 $script:SpeedApplied = "500"
-function Update-ParamBox([string]$which) {
+function Set-ParamBoxState([string]$which) {
+    # v5.17.7: ядро Update-ParamBox, вызывается и из Update-SelectionButtons -
+    # иначе цикл PlayLock каждый раз ПЕРЕВКЛЮЧАЛ Set FOV / Set fly speed, даже когда
+    # в поле уже стоит применённое (активное) значение - кнопки висели доступными.
+    # Рекурсии нет: Set-ParamBoxState ничего не вызывает назад.
     $box = if ( $which -eq "fov" ) { $controls['TbFov'] } else { $controls['TbSpeed'] }
     $btn = if ( $which -eq "fov" ) { $controls['BtnSetFov'] } else { $controls['BtnSpeed'] }
     $applied = if ( $which -eq "fov" ) { $script:FovApplied } else { $script:SpeedApplied }
     $key = if ( $box.Text.Trim() -eq $applied ) { "SyncBrush" } else { "DirtyBrush" }
     $box.Background = $window.Resources[$key]
     $btn.IsEnabled = ($key -eq "DirtyBrush")
-    # v5.17.6: FOV->key / Speed->key зависят ещё и от значения выбранной строки -
-    # правка поля меняет доступность кнопок на лету
-    try {
-        if ( $controls['DgKeys'].SelectedItem -ne $null ) { Update-SelectionButtons }
-    } catch { }
+}
+function Update-ParamBox([string]$which) {
+    Set-ParamBoxState $which
+    # v5.17.6/7: FOV->key / Speed->key и FOV->ALL / Speed->ALL зависят ещё и от
+    # значения поля - правка бокса меняет доступность всех этих кнопок на лету
+    try { Update-SelectionButtons } catch { }
 }
 $controls['TbFov'].Add_TextChanged({ Update-ParamBox "fov" })
 $controls['TbSpeed'].Add_TextChanged({ Update-ParamBox "speed" })
@@ -1619,8 +1641,8 @@ $window.Add_Closing({
 
 # ---------- theme toggle (dark default) ----------
 $script:DarkTheme = $true
-$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB"; HdrBrush = "#FF313244"; SelBrush = "#FF3D4A66" }
-$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285"; HdrBrush = "#FFE4EAF3"; SelBrush = "#FFD8E6F8" }
+$script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; StatusWarnBrush = "#FFFAB387"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB"; HdrBrush = "#FF313244"; SelBrush = "#FF3D4A66" }
+$script:LightBrushes = @{ BgBrush = "#F2E9EDF2"; PanelBrush = "#FFFFFFFF"; TableBgBrush = "#FFFFFFFF"; AltRowBrush = "#FFE9EDF3"; TextBrush = "#FF1E1E2E"; MutedBrush = "#FF5C6470"; LineBrush = "#FFB8BFCC"; StatusBrush = "#FF0B7285"; StatusWarnBrush = "#FFB45309"; DotBrush = "#FF2F9E44"; SyncBrush = "#FFD6F0DA"; DirtyBrush = "#FFE2E2E8"; NavBrush = "#FF0B7285"; HdrBrush = "#FFE4EAF3"; SelBrush = "#FFD8E6F8" }
 function Set-Theme([bool]$dark) {
     $script:DarkTheme = $dark   # фикс: без этого оба клика вычисляли одну и ту же цель
     $map = $script:DarkBrushes
@@ -1634,6 +1656,13 @@ function Set-Theme([bool]$dark) {
     # FOV/Fly speed боксы держат кисть напрямую - перерисовать под текущую тему
     Update-ParamBox "fov"
     Update-ParamBox "speed"
+    # v5.17.7: Set-Status красит текст локальным значением (перебивает DynamicResource) -
+    # после смены темы перекрашиваем статус текущей кистью того же цвета
+    try {
+        $sk = "StatusBrush"
+        if ( $script:StatusKind -eq "warn" ) { $sk = "StatusWarnBrush" }
+        $controls['TbStatus'].Foreground = $window.Resources[$sk]
+    } catch { }
 }
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
@@ -1688,6 +1717,10 @@ function Update-SelectionButtons {
         foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed')) ) {
             try { $controls[$b].IsEnabled = $false } catch { }
         }
+        # v5.17.7: цикл PlayLock выше перевключил Set FOV / Set fly speed - вернуть
+        # серость по правилу "в поле уже применённое значение"
+        Set-ParamBoxState "fov"
+        Set-ParamBoxState "speed"
         $L = $null
         if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
         if ( $L -ne $null ) {
@@ -1712,6 +1745,28 @@ function Update-SelectionButtons {
             $controls['BtnKeySpeed'].IsEnabled = ( ($spdTxt -match '^\d+(\.\d+)?$') -and ([double]$spdTxt -ne $selRow.Speed) )
         }
     } catch { }
+    # v5.17.7: FOV->ALL / Speed->ALL серые, если во ВСЕХ кадрах уже стоит значение из
+    # поля (сравниваем с тем, что реально уйдёт в игру - округлённый int, как в хендлерах)
+    try {
+        if ( $n -gt 0 ) {
+            $fovTxt = $controls['TbFov'].Text.Trim()
+            $spdTxt = $controls['TbSpeed'].Text.Trim()
+            $fovOk = ($fovTxt -match '^\d+(\.\d+)?$')
+            $spdOk = ($spdTxt -match '^\d+(\.\d+)?$')
+            $sameFov = $fovOk
+            $sameSpd = $spdOk
+            foreach ( $r in $script:KeyRows ) {
+                if ( $fovOk -and [double]([math]::Round([double]$fovTxt)) -ne $r.FOV ) { $sameFov = $false }
+                if ( $spdOk -and [double]([math]::Round([double]$spdTxt)) -ne $r.Speed ) { $sameSpd = $false }
+            }
+            $controls['BtnFovAll'].IsEnabled = (-not $sameFov)
+            $controls['BtnSpeedAll'].IsEnabled = (-not $sameSpd)
+        }
+    } catch { }
+    # v5.17.7: Set FOV / Set fly speed - вернуть правило "в поле уже применённое значение":
+    # цикл PlayLock в начале функции включил их принудительно
+    Set-ParamBoxState "fov"
+    Set-ParamBoxState "speed"
     $L = $null
     if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
     if ( $L -ne $null ) {
