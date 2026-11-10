@@ -2125,6 +2125,21 @@ if ( Test-Path $owlPath ) {
     } catch { }
 }
 
+# v5.17.10: иконка окна/таскбара - сова (Panel/icon.png); без неё таскбар показывает
+# дефолтный значок PowerShell, что мешает найти панель после Hide-ghost
+$iconPath = Join-Path $PSScriptRoot "icon.png"
+if ( Test-Path $iconPath ) {
+    try {
+        $iconBmp = New-Object Windows.Media.Imaging.BitmapImage
+        $iconBmp.BeginInit()
+        $iconBmp.UriSource = (New-Object Uri($iconPath))
+        $iconBmp.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $iconBmp.EndInit()
+        $iconBmp.Freeze()
+        $window.Icon = $iconBmp
+    } catch { }
+}
+
 # v5.17: при старте панели запрашиваем у игры снапшот пути: таблица строится из
 # дампа, а не из уцелевших обрывков кольцевого лог-буфера (иначе - фантомные кадры)
 if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) {
