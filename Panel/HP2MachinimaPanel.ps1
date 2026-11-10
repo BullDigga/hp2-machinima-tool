@@ -485,7 +485,78 @@ function Refresh-Table {
         Set-Status "table: 0 keyframes - press F8 in game to add"
     } else {
         Set-Status "table: $n keyframes (ini synced)"
+        Save-KeysBackup   # v5.17.17: автосейв при каждом изменении таблицы
     }
+}
+
+$script:KeysBackupFile = Join-Path $PSScriptRoot "keyframes-backup.hp2path"
+function Save-KeysBackup {
+    param([switch]$ForceEmpty)
+    # v5.17.17: автосейв кадров в .hp2path (тот же формат, что экспорт/импорт):
+    # переживает краш/закрытие игры и перезапуск панели. Кадры в панели живут,
+    # ПОКА ПОЛЬЗОВАТЕЛЬ САМ их не удалит: пустая таблица файл НЕ перезаписывает
+    # (явные очистки вызывают Save-KeysBackup -ForceEmpty сами)
+    try {
+        if ( $script:KeyRows.Count -eq 0 -and -not $ForceEmpty ) { return }
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $lines = @("# map=$($script:KeyMap)  format: x,y,z,yaw,pitch,fov,speed,time")
+        foreach ( $r in $script:KeyRows ) {
+            $t = $r.Time
+            if ( $t -eq $null -or $t -eq "" ) { $t = "-" }
+            $lines += ($r.X.ToString($inv) + "," + $r.Y.ToString($inv) + "," + $r.Z.ToString($inv) + "," + $r.Yaw.ToString($inv) + "," + $r.Pitch.ToString($inv) + "," + $r.FOV.ToString($inv) + "," + $r.Speed.ToString($inv) + "," + $t)
+        }
+        [System.IO.File]::WriteAllLines($script:KeysBackupFile, $lines)
+    } catch { }
+}
+function Restore-KeysBackup {
+    # v5.17.17: восстановление кадров из автосейва - ЛОКАЛЬНО в панель (без отправки
+    # в игру: её может не быть). Карта и времена тоже восстанавливаются; времена
+    # складываются в KeyTimes, чтобы пережить будущие ре-дампы
+    try {
+        if ( -not (Test-Path $script:KeysBackupFile) ) { return }
+        $allLines = [System.IO.File]::ReadAllLines($script:KeysBackupFile)
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $rows = New-Object System.Collections.ArrayList
+        $km = ""
+        $times = @{}
+        foreach ( $ln in $allLines ) {
+            if ( $ln -eq $null ) { continue }
+            $ln = $ln.TrimStart([char]0xFEFF)   # BOM первой строки не должен ломать "# map="
+            if ( $ln.Trim() -eq "" ) { continue }
+            if ( $ln.StartsWith("#") ) {
+                $m = [regex]::Match($ln, '#\s*map=([A-Za-z0-9_]+)')
+                if ( $m.Success ) { $km = $m.Groups[1].Value }
+                continue
+            }
+            $p = $ln.Trim() -split ','
+            if ( $p.Count -ge 7 -and $p[0] -match '^-?\d+(\.\d+)?$' ) {
+                $r = New-Object KeyRow
+                $r.Num  = $rows.Count
+                $r.X    = [double]$p[0]
+                $r.Y    = [double]$p[1]
+                $r.Z    = [double]$p[2]
+                $r.Yaw  = [int][double]$p[3]
+                $r.Pitch= [int][double]$p[4]
+                $r.FOV  = [double]$p[5]
+                if ( $p[6] -match '^-?\d+(\.\d+)?$' ) { $r.Speed = [double]$p[6] } else { $r.Speed = 250 }
+                $t = "-"
+                if ( $p.Count -ge 8 -and $p[7] -match '^\d{2}:\d{2}:\d{2}$' ) { $t = $p[7] }
+                $r.Time = $t
+                [void]$rows.Add($r)
+                if ( $t -ne "-" ) { $times[($r.X.ToString('F1',$inv) + ";" + $r.Y.ToString('F1',$inv) + ";" + $r.Z.ToString('F1',$inv))] = $t }
+            }
+        }
+        if ( $rows.Count -eq 0 ) { return }
+        $script:KeyRows = $rows
+        if ( $km -ne "" ) { $script:KeyMap = $km }
+        foreach ( $k in $times.Keys ) { if ( -not $script:KeyTimes.ContainsKey($k) ) { $script:KeyTimes[$k] = $times[$k] } }
+        Refresh-Table
+        $controls['TbMap'].Text = Get-MapText
+        Update-MapPreview
+        $hint = ""
+        if ( $script:KeyMap -ne "" ) { $hint = " (" + $script:KeyMap + ")" }
+        Set-Status ("restored $($rows.Count) frames from backup" + $hint)
+    } catch { }
 }
 
 $script:SyncBusy = $false
@@ -546,6 +617,9 @@ function Complete-SyncFromLogInner {
     Stop-Spin
     $rows = New-Object System.Collections.ArrayList
     $txt = $txtOverride
+    # v5.17.17: карта кадров ДО синка - синк может сбросить KeyMap (смена поколения),
+    # а правило "не стирать кадры при пустом пути" сравнивает с ней
+    $prevKeyMap = $script:KeyMap
     if ( $txtOverride -eq "" ) {
         $txt = [MemScanPanel]::AsyncResult
         [MemScanPanel]::AsyncResult = ""
@@ -833,11 +907,28 @@ function Complete-SyncFromLogInner {
         $controls['TbMap'].Text = Get-MapText
         Update-MapPreview
 
-        # v5.10: таблицу обновляем ТОЛЬКО когда есть данные - пустой результат
-        # (нет новых событий/источник умер) не должен опустошать уже показанные кадры
+        # v5.17.17: путь в игре ПУСТ (дамп 0 кадров), а в панели есть кадры той же
+        # карты и пользователь не давал явную очистку - игра перезапустилась после
+        # краша/закрытия: кадры СОХРАНЯЕМ (требование #backup: в панели всё живёт,
+        # пока пользователь сам не удалит). Явная очистка - PathClear из панели с
+        # флагом UserClearPending (гасится после этого синка). ДРУГАЯ карта - старые
+        # кадры не отображаем (goto/вставка считаются по пути игры), бэкап-файл
+        # с ними сохранён, восстановление через Import from file
+        if ( $rows.Count -eq 0 -and $script:KeyRows.Count -gt 0 -and -not $script:UserClearPending ) {
+            if ( $prevKeyMap -ne "" -and $prevKeyMap -eq $script:CurrentMap ) {
+                $rows = $script:KeyRows
+                $script:KeyMap = $prevKeyMap
+            }
+        }
+        $wasClear = $script:UserClearPending
+        $script:UserClearPending = $false
         $script:KeyRows = $rows
         Refresh-Table
         Update-SelectionButtons
+        if ( $rows.Count -eq 0 -and $wasClear ) {
+            # явная очистка в игре - бэкап тоже пустеет
+            Save-KeysBackup -ForceEmpty
+        }
         Set-Status "table: $($rows.Count) keys (memory scan OK)"
     }
 }
@@ -1553,9 +1644,12 @@ $controls['BtnPathClear'].Add_Click({
         $script:KeyRows = New-Object System.Collections.ArrayList
         $script:KeyMap = ""
         Refresh-Table
+        Save-KeysBackup -ForceEmpty   # v5.17.17: явная очистка - бэкап тоже пустеет
         Set-Status "game is not running - table cleared locally"
         return
     }
+    # v5.17.17: явная очистка - после синка с пустым путём бэкап тоже пустеет
+    $script:UserClearPending = $true
     $st = Send-GameCommand "PathClear"
     Sync-AfterCommand $st
 })
@@ -1620,6 +1714,7 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                     $script:KeyRows = $new
                     for ( $k = 0; $k -lt $script:KeyRows.Count; $k++ ) { $script:KeyRows[$k].Num = $k }
                     Refresh-Table
+                    Save-KeysBackup -ForceEmpty   # v5.17.17: явное удаление - сейвим остаток (может быть пусто)
                     Set-Status "game is not running - keyframe deleted locally"
                 }
                 return
@@ -1902,6 +1997,8 @@ $controls['BtnImport'].Add_Click({
     if ( $dlg.ShowDialog() ) {
         try {
             $allLines = [System.IO.File]::ReadAllLines($dlg.FileName)
+            # BOM первой строки не должен ломать разбор "# map=..."
+            $allLines = $allLines | ForEach-Object { $_.TrimStart([char]0xFEFF) }
             $lines = $allLines | Where-Object { $_.Trim() -ne "" -and -not $_.StartsWith("#") }
         } catch { Set-Status "import failed: $($_.Exception.Message)"; return }
         # v5.14: файл хранит карту кадров - если она не запущена, спрашиваем
@@ -2317,8 +2414,11 @@ $script:UiTimer.Add_Tick({
             }
         } elseif ( $script:CurrentMap -eq "" ) {
             # v5.17.1: карта не определена - запрашиваем у игры снапшот: без -log буфер
-            # крошечный и MAP-событие уровня в нём не выживает, а дамп несёт DUMPMAP
-            Send-GameCommand "PathDumpKeys" | Out-Null
+            # крошечный и MAP-событие уровня в нём не выживает, а дамп несёт DUMPMAP.
+            # v5.17.15: ПОЛЛ идёт мимо Confirm-GameActive - фоновые зонды не должны
+            # воровать фокус и выходить из меню каждые 5.4с
+            $script:ConfirmBypass = $true
+            try { Send-GameCommand "PathDumpKeys" | Out-Null } finally { $script:ConfirmBypass = $false }
             Sync-FromLog -Force
         }
     }
@@ -2522,6 +2622,9 @@ if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) {
     Send-GameCommand "PathDumpKeys" | Out-Null
     Sync-FromLog -Force
 }
+# v5.17.17: таблица пуста (игра закрыта/крашнулась) - восстанавливаем кадры из
+# автосейва: в панели они живут, пока пользователь сам их не удалит
+if ( $script:KeyRows.Count -eq 0 ) { Restore-KeysBackup }
 
 # v5.17.3: необработанные исключения dispatcher'а -> crash.log (панель молча умирала)
 $window.Dispatcher.add_UnhandledException({
