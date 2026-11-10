@@ -1482,7 +1482,14 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                 # v5.17.8: вставленный кадр получает время постановки (как F8/импорт) -
                 # без этого у вставленных кадров навсегда оставалось "-"
                 $script:StampNextSync = $true
-                $st = Send-GameCommand "PathInsertAt $idx"
+                # v5.17.11.1: PathInsertAt берёт FOV/скорость из ТЕКУЩЕГО состояния ИГРЫ
+                # (PlayerHarry.FovAngle / CurrentSet.fMoveSpeed в BaseCam), а юзеру нужно
+                # то, что активно в ПАНЕЛИ (зелёные значения боксов). Досылаем новому
+                # кадру (он на позиции idx) активные значения панели
+                $cmds = @("PathInsertAt $idx",
+                          "FovIdx $idx", "FovVal $($script:FovApplied)", "FovApply",
+                          "SpeedIdx $idx", "SpeedVal $($script:SpeedApplied)", "SpeedApply")
+                $st = Send-GameCommands $cmds
                 Sync-AfterCommand "insert at #$idx | $st"
                 return
             }
