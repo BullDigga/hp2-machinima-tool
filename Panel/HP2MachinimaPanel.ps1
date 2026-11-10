@@ -389,7 +389,17 @@ $script:KeyTimesFile = Join-Path $PSScriptRoot "key-times.txt"
 if ( Test-Path $script:KeyTimesFile ) {
     foreach ( $ln in [System.IO.File]::ReadAllLines($script:KeyTimesFile) ) {
         $pp = $ln.Split('|')
-        if ( $pp.Count -eq 2 -and $pp[0] -ne "" ) { $script:KeyTimes[$pp[0]] = $pp[1] }
+        if ( $pp.Count -eq 2 -and $pp[0] -ne "" ) {
+            # v5.17.9: ключ времени БЕЗ pid игры - времена должны переживать перезапуск
+            # игры (pid меняется, координаты кадра - нет). Старые записи "pid:x;y;z|t"
+            # мигрируем: отрезаем pid. Старые seq-ключи "pid:N" (без ';') не трогаем.
+            $k = $pp[0]
+            if ( $k.Contains(";") ) {
+                $ci = $k.IndexOf(":")
+                if ( $ci -ge 0 ) { $k = $k.Substring($ci + 1) }
+            }
+            if ( -not $script:KeyTimes.ContainsKey($k) ) { $script:KeyTimes[$k] = $pp[1] }
+        }
     }
 }
 
@@ -732,20 +742,19 @@ function Complete-SyncFromLogInner {
         }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
 
-        # время постановки кадра: штампуем только НОВЫЕ seq (после F8/ADD KEYFRAME);
-        # ключ привязан к pid игры, чтобы кадры разных сессий не путались;
+        # время постановки кадра: штампуем только НОВЫЕ координаты (после F8/вставки);
+        # v5.17.9: ключ = координаты БЕЗ pid (времена переживают перезапуск игры);
         # карта времён сохраняется в файл и переживает перезапуск панели
         $now = Get-Date -Format HH:mm:ss
-        $gpNow = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
-        $pfx = "0"
-        if ( $gpNow -ne $null ) { $pfx = [string]$gpNow.Id }
         $stampChanged = $false
         $ri = 0
         foreach ( $r in $rows ) {
             # v5.17.3: время привязано к КООРДИНАТАМ кадра, а не к seq: дамп даёт строкам
             # новые seq при каждом запросе, и старая привязка перештамповывала ВСЕ строки
+            # v5.17.9: БЕЗ pid игры - времена переживают перезапуск игры (pid меняется,
+            # координаты кадра на карте - нет)
             $inv = [System.Globalization.CultureInfo]::InvariantCulture
-            $sk = "${pfx}:" + $r.X.ToString('F1', $inv) + ";" + $r.Y.ToString('F1', $inv) + ";" + $r.Z.ToString('F1', $inv)
+            $sk = $r.X.ToString('F1', $inv) + ";" + $r.Y.ToString('F1', $inv) + ";" + $r.Z.ToString('F1', $inv)
             if ( -not $script:SeenSeqs.ContainsKey($sk) ) {
                 # при импорте время берём из файла (по порядку строк), а не "сейчас"
                 if ( $script:StampNextSync -and $script:PendingImportTimes -ne $null -and $ri -lt $script:PendingImportTimes.Count -and $script:PendingImportTimes[$ri] -ne "" ) {
@@ -1068,7 +1077,10 @@ function Send-PathSaveAndSync([string]$prefix) {
       </Button>
       <Button Name="BtnTheme" Grid.Column="3" Content="☀" Width="34" Height="30" FontSize="14" BorderThickness="0"
               Margin="0,0,12,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnClose" Grid.Column="4" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
+      <Button Name="BtnHide" Grid.Column="4" Content="Hide" Width="52" Height="30" FontSize="12" BorderThickness="0"
+              Margin="0,0,10,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+              ToolTip="hide the panel - Ctrl+Alt+H brings it back"/>
+      <Button Name="BtnClose" Grid.Column="5" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
@@ -1143,7 +1155,10 @@ function Send-PathSaveAndSync([string]$prefix) {
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <Grid Background="Transparent">
-                <TextBlock Text="{Binding Num}" Margin="4,0,0,0" VerticalAlignment="Center" HorizontalAlignment="Left" FontFamily="Consolas"/>
+                <!-- v5.17.9: цифра в ВЕРХНЕЙ части ячейки - на уровне текста остальных
+                     колонок (DataGridTextColumn рисует текст выше геометрического центра),
+                     и не перекрывается пилюлей "+" на нижней кромке -->
+                <TextBlock Text="{Binding Num}" Margin="4,2,0,0" VerticalAlignment="Top" HorizontalAlignment="Left" FontFamily="Consolas"/>
                 <!-- v5.17.8: зелёный "+" на НИЖНЕЙ кромке ячейки # - визуально сидит НА стыке
                      этой и следующей строки (граница row k / row k+1), ВНУТРИ ячейки.
                      Отрицательный margin (вылаз на -7px вверх) НЕ РАБОТАЕТ: DataGridCell
@@ -1254,7 +1269,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','BtnGoto','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1624,6 +1639,16 @@ $controls['CbTransparent'].Add_Checked({   $window.Opacity = 0.8; Set-Status "pa
 $controls['CbTransparent'].Add_Unchecked({ $window.Opacity = 1.0 })
 # перетаскивание за ВСЮ верхнюю панель, крестик закрывает
 $controls['HdrGrid'].Add_MouseLeftButtonDown({ try { $window.DragMove() } catch { } })
+$controls['BtnHide'].Add_Click({
+    # v5.17.9: ghost instead of $window.Hide(): with the AllowsTransparency window the
+    # real Hide SILENTLY KILLED the process ~3s later (3 reproductions, empty crash.log -
+    # native render death). Ghost keeps the HWND alive for WPF: fully transparent,
+    # click-through, not topmost. Ctrl+Alt+H (hotkey id 5) restores it.
+    $window.Topmost = $false
+    $window.Opacity = 0
+    $window.IsHitTestVisible = $false
+    $window.ShowInTaskbar = $false
+})
 $controls['BtnClose'].Add_Click({ $window.Close() })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
 $controls['DgKeys'].Add_CellEditEnding({
@@ -1665,11 +1690,12 @@ $window.Add_Loaded({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
     $hwnd = $helper.Handle
     $src = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
-    # id: 1=PathAdd(F8) 2=PathPlay(F9) 3=PathStop(F10) 4=SaveIni(F11)
+    # id: 1=PathAdd(F8) 2=PathPlay(F9) 3=PathStop(F10) 4=SaveIni(F11) 5=ShowPanel(Ctrl+Alt+H)
     [GameCtl]::RegisterHotKey($hwnd, 1, 0, 0x77) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 2, 0, 0x78) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 3, 0, 0x79) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 4, 0, 0x7A) | Out-Null
+    [GameCtl]::RegisterHotKey($hwnd, 5, 3, 0x48) | Out-Null   # MOD_CONTROL|MOD_ALT + H
     $src.AddHook({
         param($hwnd, $msg, $wparam, $lparam, $handled)
         if ( $msg -eq 0x0312 )   # WM_HOTKEY
@@ -1686,18 +1712,31 @@ $window.Add_Loaded({
                         Send-PathSaveAndSync $st
                     }) | Out-Null
                 }
+                5 {
+                    # Ctrl+Alt+H = return the ghosted panel
+                    $window.Dispatcher.BeginInvoke([Action]{
+                        try {
+                            $window.Topmost = $true
+                            $window.Opacity = 1
+                            $window.IsHitTestVisible = $true
+                            $window.ShowInTaskbar = $true
+                            $window.Show()
+                            $window.Activate()
+                        } catch { }
+                    }) | Out-Null
+                }
             }
             return [IntPtr]::Zero
         }
         return [IntPtr]::Zero
     })
-    Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear"
+    Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear / Ctrl+Alt+H panel"
     Sync-FromLog -Force
 })
 
 $window.Add_Closing({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
-    for ( $id = 1; $id -le 4; $id++ ) { [GameCtl]::UnregisterHotKey($helper.Handle, $id) | Out-Null }
+    for ( $id = 1; $id -le 5; $id++ ) { [GameCtl]::UnregisterHotKey($helper.Handle, $id) | Out-Null }
 })
 
 # ---------- theme toggle (dark default) ----------
@@ -1937,7 +1976,7 @@ $script:LocData = @{
         Fov = "📷 FOV"; FlySpeed = "✈ Fly speed"
         SetFov = "Set FOV"; FovKey = "🎯 FOV → key"; FovAll = "🌐 FOV → ALL"
         SetSpeed = "Set fly speed"; SpeedKey = "⚡ Speed → key"; SpeedAll = "🗂 Speed → ALL"
-        Transparent = "Transparent"
+        Transparent = "Transparent"; HideBtn = "Hide"
         HkFrame = "  frame"; HkPlay = "  play"; HkStop = "  stop"; HkClear = "  clear"
         TipSelect = "Select a keyframe row in the table first"
         TipEdit = "Edit the value - the button unlocks when it differs from the applied one"
@@ -1961,7 +2000,7 @@ $script:LocData = @{
         Fov = "📷 FOV"; FlySpeed = "✈ Скорость полёта"
         SetFov = "Задать FOV"; FovKey = "🎯 FOV → кадр"; FovAll = "🌐 FOV → ВСЕ"
         SetSpeed = "Задать скорость"; SpeedKey = "⚡ Скор. → кадр"; SpeedAll = "🗂 Скор. → ВСЕ"
-        Transparent = "Прозрачность"
+        Transparent = "Прозрачность"; HideBtn = "Скрыть"
         HkFrame = "  кадр"; HkPlay = "  воспроизв."; HkStop = "  стоп"; HkClear = "  очистка"
         TipSelect = "Сначала выберите кадр в таблице (клик по строке)"
         TipEdit = "Измените значение - кнопка станет активной, когда оно отличается от применённого"
@@ -1985,6 +2024,7 @@ function Set-Lang([string]$lang) {
     if ( -not $script:Playing ) { $controls['BtnPathStop'].Content = $L.Stop }
     $controls['BtnExport'].Content = $L.Export
     $controls['BtnImport'].Content = $L.Import
+    $controls['BtnHide'].Content = $L.HideBtn
     $controls['BtnGoto'].Content = $L.Goto
     $controls['BtnSetFov'].Content = $L.SetFov
     $controls['BtnFovKey'].Content = $L.FovKey
