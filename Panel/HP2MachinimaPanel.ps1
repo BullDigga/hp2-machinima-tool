@@ -252,10 +252,12 @@ function Find-GameWindow {
 }
 
 function Type-Command([string]$cmd) {
-    # unicode-ввод: не зависит от раскладки клавиатуры
+    # unicode-ввод: не зависит от раскладки клавиатуры.
+    # v5.17.2: 20мс/символ и 260мс после Enter - при быстрой печати длинных пачек команд
+    # (импорт) консоль теряла символы и Enters, значения кадров мутировали
     foreach ($ch in $cmd.ToCharArray()) {
         [GameCtl]::TapChar($ch)
-        Start-Sleep -Milliseconds 12
+        Start-Sleep -Milliseconds 20
     }
 }
 
@@ -288,7 +290,7 @@ function Send-GameCommands([string[]]$cmds) {
     foreach ($c in $cmds) {
         Type-Command $c
         [GameCtl]::Tap([uint16]$VK['enter'])
-        Start-Sleep -Milliseconds 150
+        Start-Sleep -Milliseconds 260
     }
     [GameCtl]::Tap([uint16]$VK['grave'])
     Start-Sleep -Milliseconds 80
@@ -353,7 +355,15 @@ function Read-SavedPathData {
 
 function Refresh-Table {
     # строки уже собраны в $script:KeyRows
-    $controls['DgKeys'].ItemsSource = $script:KeyRows
+    $dg = $controls['DgKeys']
+    # v5.16.2: сохраняем выделение при перезагрузке таблицы: полный рескан после
+    # удаления сбрасывал выделенную строку - несколько кадров подряд удалить нельзя
+    $sel = -1
+    try { $sel = $dg.SelectedIndex } catch { }
+    $dg.ItemsSource = $script:KeyRows
+    if ( $sel -ge 0 -and $script:KeyRows -ne $null -and $sel -lt $script:KeyRows.Count ) {
+        try { $dg.SelectedIndex = $sel } catch { }
+    }
     Update-SelectionButtons   # v5.11: серые кнопки (в т.ч. корзина) синхронно с таблицей
     $n = 0
     if ( $script:KeyRows -ne $null ) { $n = $script:KeyRows.Count }
@@ -374,7 +384,8 @@ $script:LastScanFast = $false
 function Sync-FromLog([switch]$Force) {
     # v5.8: асинхронно - скан памяти в C#-потоке, UI и крутящийся ⟳ живут.
     # Завершение разбора - в Complete-SyncFromLog (вызывается из таймера).
-    if ( $script:SyncBusy ) { return }
+    # v5.17.3: возвращает $true если синк запущен/выполнен, $false - отклонён (SyncBusy)
+    if ( $script:SyncBusy ) { return $false }
     $lf = Find-LogFile
     if ( $lf -ne "" ) {
         try {
@@ -401,9 +412,23 @@ function Sync-FromLog([switch]$Force) {
     $script:SyncForce = [bool]$Force
     Start-Spin
     [MemScanPanel]::StartAsync($gp.Id, $pairs)
+    return $true
 }
 
 function Complete-SyncFromLog {
+    param([string]$txtOverride = "")
+    try {
+        Complete-SyncFromLogInner
+    } catch {
+        # v5.17.3: исключение в синке убивало панель МОЛЧА (процесс исчезал без окна)
+        try {
+            $msg = "[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] Complete-Sync: " + $_.Exception.GetType().FullName + ": " + $_.Exception.Message + "`r`n" + $_.Exception.StackTrace + "`r`n---`r`n"
+            [System.IO.File]::AppendAllText((Join-Path $PSScriptRoot "crash.log"), $msg)
+        } catch { }
+    }
+}
+
+function Complete-SyncFromLogInner {
     param([string]$txtOverride = "")
     $script:SyncBusy = $false
     [MemScanPanel]::AsyncState = 0
@@ -452,12 +477,32 @@ function Complete-SyncFromLog {
             }
             if ( $txt -notmatch 'PATHEV:' ) { $txt = ""; $src = "" }
         } else {
-            # быстрый путь (кэш областей): принимаем только при НОВЫХ событиях
+            # быстрый путь (кэш областей): принимаем только при НОВЫХ событиях.
+            # v5.16.2: с v5.16 события несут поколение - PATHEV:<gen>:<seq>| (старый
+            # регэкс PATHEV:(\d+)\| не совпадал НИКОГДА, все быстрые синхронизации
+            # отбрасывались как "нет новых событий" - DEL/CLEAR не доходили до таблицы)
             $src = "memory"
             $newMax = 0
-            foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
-                $v = [long]$mm.Groups[1].Value
+            $hadEv = $false
+            foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+):(\d+)\|') ) {
+                $hadEv = $true
+                $v = [long]$mm.Groups[2].Value
                 if ( $v -gt $newMax ) { $newMax = $v }
+            }
+            if ( -not $hadEv ) {
+                # fallback: буфер без поколений (старый формат игры)
+                foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+)\|') ) {
+                    $hadEv = $true
+                    $v = [long]$mm.Groups[1].Value
+                    if ( $v -gt $newMax ) { $newMax = $v }
+                }
+            }
+            if ( -not $hadEv ) {
+                # в кэшированных областях нет событий вовсе - буфер переехал,
+                # нужен полный скан (Force внутри не зациклится: там LastScanFast=false)
+                $script:ScanCache.Regions = @()
+                Sync-FromLog -Force
+                return
             }
             if ( $newMax -le $script:ScanCache.LastSeq ) { $txt = ""; $src = "" }
         }
@@ -466,7 +511,9 @@ function Complete-SyncFromLog {
         # v4.5: только PATHEV:<seq>|TYPE|data - события с монотонным номером.
         # Старые PATHADD-строки игнорируются: в памяти живут КОПИИ буфера лога,
         # проигрывание сырых событий даёт мусор (очистка отменяется старыми кадрами).
-        $rxEv = [regex]'PATHEV:(\d+):(\d+)\|([A-Z]+)\|?([^\x00-\x1F]*)'
+        # v5.17.3: data только из безопасного charset - в хвосты частичных копий буфера
+        # попадает мусор кучи ("98938.00䏆▗"), каст в Double ронял ВЕСЬ синк
+        $rxEv = [regex]'PATHEV:(\d+):(\d+)\|([A-Z]+)\|?([0-9A-Za-z.,:_\-]*)'
         $ev = @()
         foreach ( $m in $rxEv.Matches($txt) ) {
             $ev += New-Object PSObject -Property @{Gen=[long]$m.Groups[1].Value; Seq=[long]$m.Groups[2].Value; T=$m.Groups[3].Value; D=$m.Groups[4].Value}
@@ -505,6 +552,11 @@ function Complete-SyncFromLog {
             $script:ScanCache.LastSeq = $mx
         }
         $isNum = '^-?\d+(\.\d+)?$'
+        # v5.17: DUMP-блок (PathDumpKeys) = снапшот истинного состояния пути от игры.
+        # Лог-буфер в памяти КОЛЬЦЕВОЙ: старые ADD-события вытесняются новыми строками
+        # лога, реплей "всей истории" даёт фантомов и неверные индексы при DEL.
+        $inDump = $false
+        $dumpRows = New-Object System.Collections.ArrayList
         foreach ( $e in $ev ) {
             switch ( $e.T ) {
                 'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = "" }
@@ -512,6 +564,51 @@ function Complete-SyncFromLog {
                     $i = [int]$e.D
                     if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) }
                     if ( $rows.Count -eq 0 ) { $script:KeyMap = "" }
+                }
+                'DUMPBEGIN' {
+                    $inDump = $true
+                    $dumpRows = New-Object System.Collections.ArrayList
+                }
+                'DUMPMAP' {
+                    # v5.17.1: имя карты в дампе - панель определяет уровень даже без -log
+                    if ( $e.D -ne "" ) { $script:CurrentMap = $e.D }
+                }
+                'KEY'   {
+                    # KEY|i,x,y,z,yaw,pitch,fov,spd - строка снапшота пути (только внутри DUMP)
+                    if ( $inDump ) {
+                        $p = $e.D -split ','
+                        if ( $p.Count -ge 8 -and $p[1] -match $isNum -and $p[2] -match $isNum -and $p[3] -match $isNum -and $p[4] -match $isNum -and $p[5] -match $isNum -and $p[6] -match $isNum -and $p[7] -match $isNum ) {
+                            $r = New-Object KeyRow
+                            $r.Time  = "-"
+                            $r.Seq   = $e.Seq
+                            $r.X     = [double]$p[1]
+                            $r.Y     = [double]$p[2]
+                            $r.Z     = [double]$p[3]
+                            $r.Yaw   = [int][double]$p[4]
+                            $r.Pitch = [int][double]$p[5]
+                            $r.FOV   = [double]$p[6]
+                            if ( $p[7] -match $isNum ) { $r.Speed = [double]$p[7] } else { $r.Speed = 250 }
+                            [void]$dumpRows.Add($r)
+                            if ( $script:CurrentMap -ne "" ) { $script:KeyMap = $script:CurrentMap }
+                        }
+                    }
+                }
+                'DUMPEND' {
+                    if ( $inDump ) {
+                        # время постановки кадров переносим со старых строк по координатам:
+                        # у дампных строк новые seq, KeyTimes на них не указывает
+                        $byCoord = @{}
+                        foreach ( $old in $rows ) {
+                            $ck = ('{0:F2};{1:F2};{2:F2}' -f $old.X, $old.Y, $old.Z)
+                            if ( -not $byCoord.ContainsKey($ck) ) { $byCoord[$ck] = $old.Time }
+                        }
+                        foreach ( $nr in $dumpRows ) {
+                            $ck = ('{0:F2};{1:F2};{2:F2}' -f $nr.X, $nr.Y, $nr.Z)
+                            if ( $byCoord.ContainsKey($ck) -and $byCoord[$ck] -ne "-" ) { $nr.Time = $byCoord[$ck] }
+                        }
+                        $rows = $dumpRows
+                        $inDump = $false
+                    }
                 }
                 'MAP'   {
                     # v5.6: имя карты идёт в том же PATHEV-потоке (событие от BaseCam.PathLogMap)
@@ -523,7 +620,8 @@ function Complete-SyncFromLog {
                 }
                 'ADD'   {
                     $p = $e.D -split ','
-                    if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum ) {
+                    # v5.17.3: валидация ВСЕХ числовых полей (мусорный хвост = пропуск события)
+                    if ( $p.Count -ge 6 -and $p[0] -match $isNum -and $p[1] -match $isNum -and $p[2] -match $isNum -and $p[3] -match $isNum -and $p[4] -match $isNum -and $p[5] -match $isNum ) {
                         $r = New-Object KeyRow
                         $r.Num   = $rows.Count
                         $r.Time  = "-"
@@ -584,18 +682,28 @@ function Complete-SyncFromLog {
         $pfx = "0"
         if ( $gpNow -ne $null ) { $pfx = [string]$gpNow.Id }
         $stampChanged = $false
+        $ri = 0
         foreach ( $r in $rows ) {
-            $sk = "${pfx}:$($r.Seq)"
+            # v5.17.3: время привязано к КООРДИНАТАМ кадра, а не к seq: дамп даёт строкам
+            # новые seq при каждом запросе, и старая привязка перештамповывала ВСЕ строки
+            $inv = [System.Globalization.CultureInfo]::InvariantCulture
+            $sk = "${pfx}:" + $r.X.ToString('F1', $inv) + ";" + $r.Y.ToString('F1', $inv) + ";" + $r.Z.ToString('F1', $inv)
             if ( -not $script:SeenSeqs.ContainsKey($sk) ) {
-                if ( $script:StampNextSync ) {
+                # при импорте время берём из файла (по порядку строк), а не "сейчас"
+                if ( $script:StampNextSync -and $script:PendingImportTimes -ne $null -and $ri -lt $script:PendingImportTimes.Count -and $script:PendingImportTimes[$ri] -ne "" ) {
+                    $script:KeyTimes[$sk] = $script:PendingImportTimes[$ri]
+                    $stampChanged = $true
+                } elseif ( $script:StampNextSync ) {
                     $script:KeyTimes[$sk] = $now
                     $stampChanged = $true
                 }
                 $script:SeenSeqs[$sk] = $true
             }
             if ( $script:KeyTimes.ContainsKey($sk) ) { $r.Time = $script:KeyTimes[$sk] }
+            $ri++
         }
         $script:StampNextSync = $false
+        $script:PendingImportTimes = $null
         if ( $stampChanged ) {
             $lines = @()
             foreach ( $k in $script:KeyTimes.Keys ) { $lines += "$k|$($script:KeyTimes[$k])" }
@@ -630,9 +738,20 @@ function Find-LogFile {
 }
 
 function Sync-AfterCommand([string]$status) {
-    # событие пишется в лог сразу после Enter - короткая пауза на всякий случай
+    # событие пишется в лог сразу после Enter - короткая пауза на всякий случай.
+    # v5.16.2: синхронизация ПОСЛЕ команды всегда полная: новое событие живёт в
+    # хвосте буфера, которого нет в кэшированных областях быстрого скана.
+    # v5.17: перед синком запрашиваем у игры СНАПШОТ пути (PathDumpKeys): таблица
+    # строится из дампа, а не из уцелевших обрывков кольцевого лог-буфера.
+    # v5.17.3: если синк отклонён (SyncBusy от предыдущего) - повторяем до 6 раз
     Start-Sleep -Milliseconds 120
-    Sync-FromLog
+    Send-GameCommands @("PathDumpKeys") | Out-Null
+    Start-Sleep -Milliseconds 120
+    $tries = 0
+    while ( -not (Sync-FromLog -Force) -and $tries -lt 6 ) {
+        Start-Sleep -Milliseconds 600
+        $tries++
+    }
     if ( $status -ne "" ) { Set-Status $status }
 }
 
@@ -1190,7 +1309,11 @@ $controls['BtnPathClear'].Add_Click({
     $st = Send-GameCommand "PathClear"
     Sync-AfterCommand $st
 })
-$controls['BtnRefresh'].Add_Click({ Sync-FromLog -Force })
+$controls['BtnRefresh'].Add_Click({
+    # v5.17: обновить = истина от игры: запрашиваем снапшот пути, затем полный скан
+    if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) { Send-GameCommand "PathDumpKeys" | Out-Null }
+    Sync-FromLog -Force
+})
 # вставить кадр ПОСЛЕ выбранного (захватывает текущую позицию камеры); без выбора - в конец
 $controls['BtnInsert'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
@@ -1249,48 +1372,56 @@ Update-ParamBox "speed"
 $controls['BtnSetFov'].Add_Click({
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
-    $script:FovApplied = $fov
+    $fovI = [string][int][math]::Round([double]$fov)   # v5.17.2: без точки в typed-команде
+    $script:FovApplied = $fovI
     Update-ParamBox "fov"
-    Set-Status (Send-GameCommand "Cam_FOV $fov")
+    Set-Status (Send-GameCommand "Cam_FOV $fovI")
 })
 $controls['BtnFovKey'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
     if ( $sel -ne $null ) {
-        $st = Send-GameCommand "PathSetKeyFov $($sel.Num) $fov"
+        # v5.17.2: 2 аргумента консоль теряет - пошагово FOV для выбранного кадра
+        $fv = [int][math]::Round([double]$fov)
+        $st = Send-GameCommands @("FovIdx $($sel.Num)","FovVal $fv","FovApply")
         Send-PathSaveAndSync $st
     } else { Set-Status "select a keyframe row first" }
 })
 $controls['BtnFovAll'].Add_Click({
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
-    $st = Send-GameCommand "PathSetAllFov $fov"
+    $fovI = [string][int][math]::Round([double]$fov)
+    $st = Send-GameCommand "PathSetAllFov $fovI"
     Sync-AfterCommand $st
 })
 $controls['BtnSpeed'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
-    $script:SpeedApplied = $sp
+    $spI = [string][int][math]::Round([double]$sp)
+    $script:SpeedApplied = $spI
     Update-ParamBox "speed"
-    Set-Status (Send-GameCommand "Cam_MoveSpeed $sp")
+    Set-Status (Send-GameCommand "Cam_MoveSpeed $spI")
 })
 $controls['BtnKeySpeed'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     if ( $sel -ne $null ) {
-        $st = Send-GameCommand "PathSetKeySpeed $($sel.Num) $sp"
+        # v5.17.2: пошагово скорость для выбранного кадра
+        $sv = [int][math]::Round([double]$sp)
+        $st = Send-GameCommands @("SpeedIdx $($sel.Num)","SpeedVal $sv","SpeedApply")
         Send-PathSaveAndSync $st
     } else { Set-Status "select a keyframe row first" }
 })
-# применить скорость из бокса ко ВСЕМ кадрам: пачка PathSetKeySpeed за одну сессию консоли
+# применить скорость из бокса ко ВСЕМ кадрам: пачка staged-команд за одну сессию консоли
 $controls['BtnSpeedAll'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     if ( $script:KeyRows.Count -eq 0 ) { Set-Status "no keyframes"; return }
+    $sv = [int][math]::Round([double]$sp)
     $cmds = @()
-    for ( $i = 0; $i -lt $script:KeyRows.Count; $i++ ) { $cmds += "PathSetKeySpeed $i $sp" }
+    for ( $i = 0; $i -lt $script:KeyRows.Count; $i++ ) { $cmds += @("SpeedIdx $i","SpeedVal $sv","SpeedApply") }
     $st = Send-GameCommands $cmds
     Sync-AfterCommand $st
 })
@@ -1302,9 +1433,13 @@ $controls['BtnExport'].Add_Click({
     $dlg.Filter = "HP2 path (*.hp2path)|*.hp2path|All files (*.*)|*.*"
     $dlg.FileName = "$($script:KeyMap).hp2path"
     if ( $dlg.ShowDialog() ) {
-        $lines = @("# map=$($script:CurrentMap)  format: x,y,z,yaw,pitch,fov,speed")
+        # v5.17.3: 8-е поле - время постановки кадра (переживает экспорт/импорт).
+        # Числа - через InvariantCulture: -f с ru-RU культурой пишет "195,153931"
+        # (запятая = десятичный разделитель) и рвёт CSV на лишние поля
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $lines = @("# map=$($script:CurrentMap)  format: x,y,z,yaw,pitch,fov,speed,time")
         foreach ( $r in $script:KeyRows ) {
-            $lines += ("{0},{1},{2},{3},{4},{5},{6}" -f $r.X, $r.Y, $r.Z, $r.Yaw, $r.Pitch, $r.FOV, $r.Speed)
+            $lines += ($r.X.ToString($inv) + "," + $r.Y.ToString($inv) + "," + $r.Z.ToString($inv) + "," + $r.Yaw.ToString($inv) + "," + $r.Pitch.ToString($inv) + "," + $r.FOV.ToString($inv) + "," + $r.Speed.ToString($inv) + "," + $r.Time)
         }
         try {
             [System.IO.File]::WriteAllLines($dlg.FileName, $lines)
@@ -1334,18 +1469,36 @@ $controls['BtnImport'].Add_Click({
             $r = [System.Windows.MessageBox]::Show($msg, $L.LoadMapTitle, 'YesNo', 'Question')
             if ( $r -ne 'Yes' ) { Set-Status "import cancelled"; return }
             Set-Status ("loading map $($fileMap)...")
-            [void](Send-GameCommand "open $($fileMap).unr")
+            [void](Send-GameCommand "open $($fileMap)")
             Start-Sleep -Seconds 8
-            $script:PendingFullSync = $true
-            $script:FullRetryDone = $false
         }
+        # v5.17.2: консоль M212 при вводе берёт ТОЛЬКО ПЕРВЫЙ аргумент typed-exec -
+        # PathAddXYZ x y z ... терял y,z,yaw,pitch,fov,spd (нули и дефолты в кадре).
+        # Кадр собирается пошагово: AddX/AddY/.../AddSpd, затем AddCommit.
+        # Координаты - offset-целые (v=(coord+16777216)*10, без точек и минусов),
+        # углы - положительный mod 65536 (ротатор заворачивается семантически верно)
         $cmds = @("PathClear")
         $n = 0
+        $script:PendingImportTimes = @()
         foreach ( $ln in $lines ) {
             $p = $ln.Trim() -split ','
             if ( $p.Count -ge 7 ) {
-                $cmds += ("PathAddXYZ {0} {1} {2} {3} {4} {5} {6}" -f $p[0], $p[1], $p[2], $p[3], $p[4], $p[5], $p[6])
-                $n++
+                try {
+                    # offset 1000000: закодированное значение < 2^24 - коэрция float на стороне игры точная
+                    $xk = [int][math]::Round(([double]$p[0] + 1000000.0) * 10.0)
+                    $yk = [int][math]::Round(([double]$p[1] + 1000000.0) * 10.0)
+                    $zk = [int][math]::Round(([double]$p[2] + 1000000.0) * 10.0)
+                    $yw = [long][double]$p[3]; $yw = (($yw % 65536) + 65536) % 65536
+                    $pt = [long][double]$p[4]; $pt = (($pt % 65536) + 65536) % 65536
+                    $fv = [int][math]::Round([double]$p[5])
+                    $sp = [int][math]::Round([double]$p[6])
+                    $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddCommit")
+                    $n++
+                    # v5.17.3: время постановки из 8-го поля (если валидное)
+                    $t = ""
+                    if ( $p.Count -ge 8 -and $p[7] -match '^\d{2}:\d{2}:\d{2}$' ) { $t = $p[7] }
+                    $script:PendingImportTimes += $t
+                } catch { }
             }
         }
         if ( $n -eq 0 ) { Set-Status "no valid keyframe lines in file"; return }
@@ -1371,7 +1524,10 @@ $controls['DgKeys'].Add_CellEditEnding({
         if ( $row -ne $null ) { $idx = $row.Num }
         $window.Dispatcher.BeginInvoke([Action]{
             if ( $val -match '^\d+(\.\d+)?$' -and $idx -ge 0 ) {
-                $st = Send-GameCommand "PathSetKeySpeed $idx $val"
+                # v5.17.2: PathSetKeySpeed(i,s) - 2 аргумента, консоль теряет второй;
+                # пошагово: индекс -> значение -> применить
+                $v2 = [int][math]::Round([double]$val)
+                $st = Send-GameCommands @("SpeedIdx $idx","SpeedVal $v2","SpeedApply")
                 Send-PathSaveAndSync $st
             } else {
                 Set-Status "bad speed value: '$val'"
@@ -1585,6 +1741,9 @@ $script:UiTimer.Add_Tick({
                 Set-Status "game closed"
             }
         } elseif ( $script:CurrentMap -eq "" ) {
+            # v5.17.1: карта не определена - запрашиваем у игры снапшот: без -log буфер
+            # крошечный и MAP-событие уровня в нём не выживает, а дамп несёт DUMPMAP
+            Send-GameCommand "PathDumpKeys" | Out-Null
             Sync-FromLog -Force
         }
     }
@@ -1741,6 +1900,23 @@ if ( Test-Path $owlPath ) {
         $controls['ImgOwl'].Source = $bmp
     } catch { }
 }
+
+# v5.17: при старте панели запрашиваем у игры снапшот пути: таблица строится из
+# дампа, а не из уцелевших обрывков кольцевого лог-буфера (иначе - фантомные кадры)
+if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) {
+    Send-GameCommand "PathDumpKeys" | Out-Null
+    Sync-FromLog -Force
+}
+
+# v5.17.3: необработанные исключения dispatcher'а -> crash.log (панель молча умирала)
+$window.Dispatcher.add_UnhandledException({
+    param($s, $a)
+    try {
+        $msg = "[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] Dispatcher: " + $a.Exception.GetType().FullName + ": " + $a.Exception.Message + "`r`n" + $a.Exception.StackTrace + "`r`n---`r`n"
+        [System.IO.File]::AppendAllText((Join-Path $PSScriptRoot "crash.log"), $msg)
+    } catch { }
+    $a.Handled = $true
+})
 
 $window.ShowDialog() | Out-Null
 
