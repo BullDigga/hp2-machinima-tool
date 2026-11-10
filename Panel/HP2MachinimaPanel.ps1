@@ -1365,7 +1365,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1382,6 +1382,8 @@ function Set-Status([string]$s, [string]$kind = "ok") {
     if ( $kind -eq "warn" ) { $sk = "StatusWarnBrush" }
     if ( $kind -eq "err" ) { $sk = "StatusErrBrush" }
     try { $controls['TbStatus'].Foreground = $window.Resources[$sk] } catch { }
+    # v5.17.16 (#7): кружок статуса красится тем же цветом - красный, когда нет игры
+    try { $controls['StatusDot'].Fill = $window.Resources[$sk] } catch { }
     try {
         # дубли подряд (полл статуса раз в 5.4с) в журнал не пишем - шум
         $dup = $false
@@ -1545,7 +1547,10 @@ $controls['BtnPathStop'].Add_Click({
 $controls['BtnPathClear'].Add_Click({
     # v5.14: игра закрыта - чистим таблицу локально (команды отправлять некому)
     if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
-        $script:KeyRows.Clear()
+        # v5.17.16 (#hotfix): KeyRows - ArrayList, УЖЕ назначенный ItemsSource: мутируя
+        # его (Clear) и переназначая ТОТ ЖЕ экземпляр, вью таблицы не перестраивается -
+        # строки оставались на экране. Заменяем экземпляр новым пустым
+        $script:KeyRows = New-Object System.Collections.ArrayList
         $script:KeyMap = ""
         Refresh-Table
         Set-Status "game is not running - table cleared locally"
@@ -1606,7 +1611,13 @@ $delHandler = [System.Windows.RoutedEventHandler]{
             # v5.14: игра закрыта - удаляем строку локально
             if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
                 if ( $idx -ge 0 -and $idx -lt $script:KeyRows.Count ) {
-                    $script:KeyRows.RemoveAt($idx)
+                    # v5.17.16: новая коллекция ВМЕСТО мутации - ItemsSource держит старый
+                    # экземпляр, вью иначе не перестраивается (см. очистку таблицы выше)
+                    $new = New-Object System.Collections.ArrayList
+                    for ( $k = 0; $k -lt $script:KeyRows.Count; $k++ ) {
+                        if ( $k -ne $idx ) { [void]$new.Add($script:KeyRows[$k]) }
+                    }
+                    $script:KeyRows = $new
                     for ( $k = 0; $k -lt $script:KeyRows.Count; $k++ ) { $script:KeyRows[$k].Num = $k }
                     Refresh-Table
                     Set-Status "game is not running - keyframe deleted locally"
@@ -2119,7 +2130,7 @@ $controls['LogPopupBorder'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $scri
 $script:SelDep = @('BtnFovKey','BtnKeySpeed')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','BtnRefresh','TbFov','TbSpeed')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
