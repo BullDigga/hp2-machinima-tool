@@ -1634,6 +1634,30 @@ $window.Add_Loaded({
     } catch { }
 })
 
+# v5.17.11.4: курсор-рука над ВЕРХНЕЙ половиной плюса - она лежит НА шапке, и курсор
+# там задаёт хедер (стрелка), а не адорнер. Хук на MouseMove САМОГО грида (пузырится
+# из хедера): в ректе ВЕРХНЕЙ половины пилюли ставим Hand на OriginalSource; ниже
+# стыка не трогаем - у кнопки строки 0 уже свой Hand. Сброс - только если текущий
+# источник был Hand (иначе затрём курсоры других элементов)
+# ВАЖНО: Add_MouseMove НЕ срабатывает над хедером - DataGrid глотает MouseMove
+# внутренними обработчиками (e.Handled, колонки-драг). Только AddHandler c
+# handledEventsToo=$true доходит сюда
+$pillMoveHandler = [System.Windows.Input.MouseEventHandler]{
+    param($s, $e)
+    try {
+        if ( $script:PillAdorner -eq $null -or $script:PillAX -le 0 ) { return }
+        $pt = $e.GetPosition($script:PillAdorner.Parent)
+        $src = $e.OriginalSource
+        if ( -not ($src -is [System.Windows.FrameworkElement]) ) { return }
+        if ( $pt.Y -le $script:PillAY -and $pt.Y -ge ($script:PillAY - 6) -and [Math]::Abs($pt.X - $script:PillAX) -le 8 ) {
+            $src.Cursor = [System.Windows.Input.Cursors]::Hand
+        } elseif ( $pt.Y -le $script:PillAY -and $src.Cursor -eq [System.Windows.Input.Cursors]::Hand ) {
+            $src.Cursor = [System.Windows.Input.Cursors]::Arrow
+        }
+    } catch { }
+}
+$controls['DgKeys'].AddHandler([System.Windows.Input.Mouse]::MouseMoveEvent, $pillMoveHandler, $true)
+
 function Find-VisualChildOfType($el, $t) {
     $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($el)
     for ( $i = 0; $i -lt $n; $i++ ) {
