@@ -768,13 +768,20 @@ function Complete-SyncFromLogInner {
             $inv = [System.Globalization.CultureInfo]::InvariantCulture
             $sk = $r.X.ToString('F1', $inv) + ";" + $r.Y.ToString('F1', $inv) + ";" + $r.Z.ToString('F1', $inv)
             if ( -not $script:SeenSeqs.ContainsKey($sk) ) {
-                # при импорте время берём из файла (по порядку строк), а не "сейчас"
-                if ( $script:StampNextSync -and $script:PendingImportTimes -ne $null -and $ri -lt $script:PendingImportTimes.Count -and $script:PendingImportTimes[$ri] -ne "" ) {
-                    $script:KeyTimes[$sk] = $script:PendingImportTimes[$ri]
-                    $stampChanged = $true
-                } elseif ( $script:StampNextSync ) {
-                    $script:KeyTimes[$sk] = $now
-                    $stampChanged = $true
+                # v5.17.11: штампуем ТОЛЬКО если у координат ещё НЕТ сохранённого времени.
+                # SeenSeqs живёт в памяти панели и пуст после её перезапуска; если стартовый
+                # дамп поймал не все кадры, без этой проверки штемпель "сейчас" ПЕРЕЗАПИСЫВАЛ
+                # сохранённое в key-times.txt время старого кадра (у 2840.9 сломалось
+                # 13:42:40 -> 22:22:26 при вставке соседнего кадра)
+                if ( -not $script:KeyTimes.ContainsKey($sk) ) {
+                    # при импорте время берём из файла (по порядку строк), а не "сейчас"
+                    if ( $script:StampNextSync -and $script:PendingImportTimes -ne $null -and $ri -lt $script:PendingImportTimes.Count -and $script:PendingImportTimes[$ri] -ne "" ) {
+                        $script:KeyTimes[$sk] = $script:PendingImportTimes[$ri]
+                        $stampChanged = $true
+                    } elseif ( $script:StampNextSync ) {
+                        $script:KeyTimes[$sk] = $now
+                        $stampChanged = $true
+                    }
                 }
                 $script:SeenSeqs[$sk] = $true
             }
@@ -944,6 +951,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="ClipToBounds" Value="False"/>
       <Style.Triggers>
         <Trigger Property="IsSelected" Value="True">
           <Setter Property="Background" Value="{DynamicResource SelBrush}"/>
@@ -952,11 +960,17 @@ function Send-PathSaveAndSync([string]$prefix) {
       </Style.Triggers>
     </Style>
     <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
+      <Setter Property="ClipToBounds" Value="False"/>
       <Style.Triggers>
         <Trigger Property="IsSelected" Value="True">
           <Setter Property="Background" Value="{DynamicResource SelBrush}"/>
         </Trigger>
       </Style.Triggers>
+    </Style>
+    <!-- v5.17.11: пилюля "+" обязана ВЫЛЕЗАТЬ за верхнюю границу строки (ровно на стык
+         с предыдущей строкой) - запрещаем обрезку по всей вертикальной цепочке -->
+    <Style TargetType="DataGridCellsPresenter" BasedOn="{StaticResource {x:Type DataGridCellsPresenter}}">
+      <Setter Property="ClipToBounds" Value="False"/>
     </Style>
   </Window.Resources>
   <Grid Margin="12">
@@ -1164,25 +1178,29 @@ function Send-PathSaveAndSync([string]$prefix) {
               AlternatingRowBackground="{DynamicResource AltRowBrush}" RowHeight="26"
               EnableRowVirtualization="False">
       <DataGrid.Columns>
-        <DataGridTemplateColumn Header="#" Width="30">
+        <DataGridTemplateColumn Header="#" Width="40">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <Grid Background="Transparent">
                 <!-- v5.17.9: цифра в ВЕРХНЕЙ части ячейки - на уровне текста остальных
-                     колонок (DataGridTextColumn рисует текст выше геометрического центра),
-                     и не перекрывается пилюлей "+" на нижней кромке -->
+                     колонок (DataGridTextColumn рисует текст выше геометрического центра);
+                     плюсик справа от неё, поэтому колонка расширена 30 -> 40 -->
                 <TextBlock Text="{Binding Num}" Margin="4,2,0,0" VerticalAlignment="Top" HorizontalAlignment="Left" FontFamily="Consolas"/>
-                <!-- v5.17.8: зелёный "+" на НИЖНЕЙ кромке ячейки # - визуально сидит НА стыке
-                     этой и следующей строки (граница row k / row k+1), ВНУТРИ ячейки.
-                     Отрицательный margin (вылаз на -7px вверх) НЕ РАБОТАЕТ: DataGridCell
-                     обрезает контент (проверено: кнопки Visible, но IsOffscreen, 0 зелёных
-                     пикселей). Клик = вставить ТЕКУЩИЙ кадр камеры между k и k+1 ->
-                     delHandler шлёт PathInsertAt (Num+1) -->
+                <!-- v5.17.11: зелёный "+" РОВНО НА СТЫКЕ этой и предыдущей строки:
+                     центр кнопки совпадает с верхней границей ячейки (верхняя половина
+                     в предыдущей строке, нижняя - в этой). Пилюля принадлежит СТРОКЕ k,
+                     но рисуется поверх строки k-1: StackPanel рисует поздние строки
+                     поверх ранних, а ClipToBounds=False снял обрезку по цепочке
+                     DataGridCell/CellsPresenter/Row. Вниз так нельзя: строка k+1
+                     рисуется ПОЗЖЕ и закрашивает выступ нижней половины.
+                     Справа от цифры, чтобы не перекрывать её.
+                     Клик = вставить ТЕКУЩИЙ кадр камеры на позицию Num (между k-1 и k);
+                     у строки 0 это вставка в начало пути. delHandler шлёт PathInsertAt Num -->
                 <!-- видны, пока курсор где-либо над таблицей (IsMouseOver грида) -->
                 <Button Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
-                        Width="18" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
-                        Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Bottom"
-                        Margin="2,0,0,0" ToolTip="insert CURRENT camera keyframe AFTER this row"
+                        Width="16" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
+                        Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Top"
+                        Margin="22,-6,0,0" ToolTip="insert CURRENT camera keyframe here (between this and the previous row)"
                         Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource BoolToVis}}"/>
               </Grid>
             </DataTemplate>
@@ -1427,15 +1445,15 @@ $controls['BtnRefresh'].Add_Click({
     if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) { Send-GameCommand "PathDumpKeys" | Out-Null }
     Sync-FromLog -Force
 })
-# ---------- v5.17.8: зелёные "+" на стыках строк ----------
-# ПЛЮСИКИ ЖИВУТ В ШАБЛОНЕ КОЛОНКИ # (см. XAML): кнопка вылезает на -7px над верхней
-# границей строки = ровно стык с предыдущей, видна когда курсор где-либо над таблицей
-# (IsMouseOver грида). ПЕРВАЯ строка (Num=0) - исключение: её стык-сверху не существует
-# (над ней хедер), кнопка там не имеет смысла и скрыта триггером по Num=0 ниже.
-# ПРИЧИНА ПИВОТА: overlay-Canvas в гриде упорно не рендерился (проверено layout-логом:
-# размеры/offset/IsVisible идеальные, а зелёных пикселей в скриншоте 0, UIA IsOffscreen) -
-# шаблонные кнопки в ячейках при этом рендерятся надёжно (корзина тому proof).
-# Клик ловится routed-хендлером Button.Click ниже по тегу "ins:N" -> PathInsertAt N.
+# ---------- v5.17.11: зелёные "+" РОВНО НА СТЫКАХ строк ----------
+# ПЛЮСИКИ ЖИВУТ В ШАБЛОНЕ КОЛОНКИ # (см. XAML): кнопка центрирована на ВЕРХНЕЙ
+# границе строки (половина в предыдущей строке) = ровно стык, видна когда курсор
+# где-либо над таблицей (IsMouseOver грида). Вниз выступать нельзя: строка k+1
+# рисуется позже и ЗАКРАШИВАЕТ выступ; вверх - можно (строка k рисуется поверх
+# k-1), ClipToBounds=False по цепочке Cell/CellsPresenter/Row снимает обрезку.
+# v5.17.8-pivot-история: overlay-Canvas в гриде упорно не рендерился (layout-лог
+# идеальный, зелёных пикселей 0) - шаблонные кнопки в ячейках рендерятся надёжно.
+# Клик ловится routed-хендлером Button.Click ниже: Content=="+" -> PathInsertAt Num.
 $controls['BtnGoto'].Add_Click({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -ne $null ) { Set-Status (Send-GameCommand "PathGoto $($sel.Num)") }
@@ -1454,9 +1472,10 @@ $delHandler = [System.Windows.RoutedEventHandler]{
             # StringFormat на object-свойстве (Tag) WPF МОЛЧА ИГНОРИРУЕТ - тег всегда
             # просто число, "ins:N" не получить. Пилюля "+" = Content "+", корзина = "🗑"
             if ( [string]$b.Content -eq "+" ) {
-                # плюсик на НИЖНЕЙ кромке строки N = стык N/N+1: вставляем ТЕКУЩИЙ кадр
-                # камеры на позицию N+1 (между N и N+1)
-                $idx = [int]$tag + 1
+                # v5.17.11: плюсик сидит РОВНО НА СТЫКЕ над строкой N (верхняя граница
+                # её ячейки) = между строками N-1 и N: вставляем ТЕКУЩИЙ кадр камеры на
+                # позицию N. У строки 0 это вставка в начало пути.
+                $idx = [int]$tag
                 if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
                     Set-Status "game is not running - cannot insert"; return
                 }
