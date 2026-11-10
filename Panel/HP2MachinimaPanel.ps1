@@ -1228,10 +1228,13 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTemplateColumn Width="30">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
-              <!-- v5.17.11.5: значок-метка "перейти к кадру" (вместо кнопки под таблицей):
-                   появляется при наведении на строку, слева от корзины. Клик = PathGoto Num -->
-              <Button Content="📍" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
+              <!-- v5.17.11.7: значок-глаз "посмотреть как выглядит кадр" (goto, вместо
+                   метки; 📍 убрана, а 👁 U+1F441 в этих кнопках НЕ РИСУЕТСЯ - поэтому
+                   глиф RedEye U+E7B3 из Segoe MDL2 Assets, он рендерится reliably).
+                   Появляется при наведении на строку, слева от корзины. Клик = PathGoto Num -->
+              <Button Content="&#xE7B3;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="14" Cursor="Hand" BorderThickness="0"
                       Background="Transparent" Foreground="#2196F3" HorizontalAlignment="Center" Padding="2,0"
+                      ToolTip="preview this keyframe (jump the camera to it)"
                       Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
@@ -1494,8 +1497,10 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                 Insert-KeyframeAt ([int]$tag)
                 return
             }
-            if ( [string]$b.Content -eq "📍" ) {
-                # v5.17.11.5: метка на строке = переход камеры к кадру N (бывший BtnGoto)
+            if ( [string]$b.Content -eq [string][char]0xE7B3 ) {
+                # v5.17.11.7: глаз на строке = "посмотреть как выглядит кадр": переход
+                # камеры к кадру N (PathGoto). Роутер по Content - глиф RedEye из Segoe
+                # MDL2 Assets (нет в тексте - сравнение через [char])
                 if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
                     Set-Status "game is not running - cannot goto"; return
                 }
