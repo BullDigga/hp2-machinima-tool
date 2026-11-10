@@ -451,6 +451,7 @@ function Refresh-Table {
         # v5.12: кадров нет - метка карты смысла не имеет, сбрасываем
         $script:KeyMap = ""
         $controls['TbMap'].Text = Get-MapText
+        Update-MapPreview
         Set-Status "table: 0 keyframes - press F8 in game to add"
     } else {
         Set-Status "table: $n keyframes (ini synced)"
@@ -800,6 +801,7 @@ function Complete-SyncFromLogInner {
         $lm = [regex]::Match($txt, 'LoadMap: ([A-Za-z0-9_]+)')
         if ( $lm.Success ) { $script:CurrentMap = $lm.Groups[1].Value }
         $controls['TbMap'].Text = Get-MapText
+        Update-MapPreview
 
         # v5.10: таблицу обновляем ТОЛЬКО когда есть данные - пустой результат
         # (нет новых событий/источник умер) не должен опустошать уже показанные кадры
@@ -1244,8 +1246,18 @@ function Send-PathSaveAndSync([string]$prefix) {
                 HorizontalContentAlignment="Left" Padding="18,4" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
         <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,10,0,3"/>
-        <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
-                   TextWrapping="Wrap" Margin="2,0,0,10"/>
+        <Grid Margin="2,0,0,10">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock Name="TbMap" Grid.Column="0" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
+                     TextWrapping="Wrap" VerticalAlignment="Center"/>
+          <!-- v5.17.13: превью карты из system/Thumbnails/<MapName>.bmp (120x90,
+               генерируется самой игрой для UI выбора карт), справа от названия -->
+          <Image Name="ImgMapPreview" Grid.Column="1" Width="72" Height="54" Stretch="Uniform"
+                 HorizontalAlignment="Right" VerticalAlignment="Top"/>
+        </Grid>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
                 HorizontalContentAlignment="Left" Padding="14,4" ToolTipService.ShowOnDisabled="True"/>
@@ -1306,7 +1318,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1324,6 +1336,31 @@ function Get-MapText {
     # v5.14: лейбл показывает карту КАДРОВ, а не где игрок сейчас
     if ( $script:KeyMap -ne "" ) { return $script:KeyMap }
     return $script:LocData[$script:Lang].NoMap
+}
+
+function Update-MapPreview {
+    # v5.17.13: превью карты кадров из system/Thumbnails/<MapName>.bmp
+    # (120x90 bmp, сама игра генерирует их для UI выбора карт). Нет файла -
+    # картинка скрывается
+    try {
+        $img = $controls['ImgMapPreview']
+        if ( $img -eq $null ) { return }
+        $map = $script:KeyMap
+        $path = "F:\Harry Potter and the Chamber of Secrets\system\Thumbnails\" + $map + ".bmp"
+        if ( $map -ne "" -and (Test-Path $path) ) {
+            $bmp = New-Object Windows.Media.Imaging.BitmapImage
+            $bmp.BeginInit()
+            $bmp.UriSource = (New-Object Uri($path))
+            $bmp.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            $bmp.EndInit()
+            $bmp.Freeze()
+            $img.Source = $bmp
+            $img.Visibility = [System.Windows.Visibility]::Visible
+        } else {
+            $img.Source = $null
+            $img.Visibility = [System.Windows.Visibility]::Collapsed
+        }
+    } catch { }
 }
 
 function Do-PathAdd {
@@ -2274,6 +2311,7 @@ function Set-Lang([string]$lang) {
     $controls['TxSec'].Text = $L.Sec
     $controls['TxFlySpeed'].Text = $L.FlySpeed
     $controls['TbMap'].Text = Get-MapText
+    Update-MapPreview
     # подсказки на серых кнопках
     foreach ( $b in @('BtnFovKey','BtnKeySpeed') ) { $controls[$b].ToolTip = $L.TipSelect }
     foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
