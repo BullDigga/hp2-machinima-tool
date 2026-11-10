@@ -310,10 +310,40 @@ function Focus-GameWindow([IntPtr]$h) {
 }
 
 $script:SendBusy = $false
+$script:ConfirmBypass = $false
+function Confirm-GameActive {
+    # v5.17.15 (#1): перед манипуляциями с терминалом убеждаемся, что игра НА УРОВНЕ.
+    # Игра запущена, но уровень не определён (CurrentMap == "") = меню или загрузка:
+    # фокусируем окно игры и до ~3с ждём появления уровня; не дождались - отказ.
+    # Вызывается из Send-GameCommands (пользовательские действия); 5.4с-полл живёт на
+    # одиночном Send-GameCommand и меню не покидает.
+    # ВНИМАНИЕ: зонд через Send-GameCommand -> Send-GameCommands -> Confirm - рекурсия;
+    # поэтому зонд идёт с флагом ConfirmBypass (один уровень вложенности, UI однопоточен)
+    try {
+        if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
+            Set-Status $script:LocData[$script:Lang].TipNoWindow "err"
+            return $false
+        }
+        if ( $script:CurrentMap -ne "" ) { return $true }
+        $h = Find-GameWindow
+        if ( $h -ne [IntPtr]::Zero ) { Focus-GameWindow $h | Out-Null }
+        for ( $i = 0; $i -lt 6; $i++ ) {
+            Wait-Pump 500
+            $script:ConfirmBypass = $true
+            try { Send-GameCommand "PathDumpKeys" | Out-Null } finally { $script:ConfirmBypass = $false }
+            Sync-FromLog -Force
+            if ( $script:CurrentMap -ne "" ) { return $true }
+        }
+        Set-Status $script:LocData[$script:Lang].TipInMenu "err"
+        return $false
+    } catch { return $false }
+}
+
 function Send-GameCommands([string[]]$cmds) {
     # v5.17.6: защита от повторного клика во время печати + Pump-Dispatcher
     # прокачивает отрисовку - спиннер крутится СРАЗУ и НЕ ЗАМИРАЕТ на весь ввод
     if ( $script:SendBusy ) { return "busy - command still sending" }
+    if ( -not $script:ConfirmBypass -and -not (Confirm-GameActive) ) { return "aborted: game not on a level" }
     $script:SendBusy = $true
     try {
         Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
@@ -1561,9 +1591,8 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                 # v5.17.11.7: глаз на строке = "посмотреть как выглядит кадр": переход
                 # камеры к кадру N (PathGoto). Роутер по Content - глиф RedEye из Segoe
                 # MDL2 Assets (нет в тексте - сравнение через [char])
-                if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null ) {
-                    Set-Status "game is not running - cannot goto"; return
-                }
+                # v5.17.15 (#1): игра должна быть на уровне (меню -> фокус на игру/отказ)
+                if ( -not (Confirm-GameActive) ) { return }
                 # v5.14: кадры с другой карты - переходить нельзя
                 if ( $script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap ) {
                     $L = $script:LocData[$script:Lang]
@@ -1584,6 +1613,8 @@ $delHandler = [System.Windows.RoutedEventHandler]{
                 }
                 return
             }
+            # v5.17.15 (#1): игра запущена, но в меню - удалять из терминала нельзя
+            if ( -not (Confirm-GameActive) ) { return }
             $st = Send-GameCommand "PathDel $idx"
             Send-PathSaveAndSync $st
         } catch { }
@@ -2315,6 +2346,7 @@ $script:LocData = @{
         TipLang = "Language"
         TipGithub = "Open the GitHub repository"
         TipNoWindow = "can't see the game window"
+        TipInMenu = "the game is in the menu - load a map first"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -2348,6 +2380,7 @@ $script:LocData = @{
         TipLang = "Язык"
         TipGithub = "Открыть репозиторий на GitHub"
         TipNoWindow = "не видно активного окна игры"
+        TipInMenu = "игра в меню - сначала загрузи карту"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
