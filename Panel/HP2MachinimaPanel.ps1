@@ -979,14 +979,7 @@ function Send-PathSaveAndSync([string]$prefix) {
   <Grid Name="RootGrid" Margin="12">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
@@ -1020,7 +1013,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         </Border>
       </UniformGrid>
       <Button Name="BtnLang" Grid.Column="2" Width="34" Height="30" Margin="0,0,12,0" BorderThickness="0"
-              Background="{DynamicResource PanelBrush}" Cursor="Hand" ToolTip="Language / Язык">
+              Background="{DynamicResource PanelBrush}" Cursor="Hand" ToolTip="{DynamicResource TipLang}">
         <Grid>
           <Border Name="FlagEN" CornerRadius="3" Width="22" Height="15" ClipToBounds="True">
             <Canvas Width="22" Height="15">
@@ -1109,72 +1102,26 @@ function Send-PathSaveAndSync([string]$prefix) {
               Margin="0,0,12,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Name="BtnHide" Grid.Column="4" Content="_" Width="34" Height="30" FontWeight="Bold" FontSize="16" BorderThickness="0"
               Margin="0,0,10,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" Padding="0,2,0,0"
-              ToolTip="Скрыть панель / Hide panel (Ctrl+Alt+H - вернуть)"/>
+              ToolTip="{DynamicResource TipHide}"/>
       <Button Name="BtnClose" Grid.Column="5" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
 
-    <!-- game view helpers: одна кнопка-переключатель (панель помнит состояние HUD) -->
-    <Button Name="BtnHudHide" Grid.Row="1" Content="🙈  Hide HUD" Height="34" Margin="3,0,3,6"
-            Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-
-    <!-- main action -->
-    <Button Name="BtnPathAdd" Grid.Row="2" Content="📷  ADD KEYFRAME" Height="52" Margin="3,0,3,6"
-            Background="#3FA85C" Foreground="White" FontSize="17" FontWeight="Bold"/>
-
-    <!-- two PLAY buttons stacked (time pointer inside by-TIME) + Stop spanning both -->
-    <Grid Grid.Row="3" Margin="3,0,3,6">
+    <!-- v5.17.12: таблица растянута на весь остаток окна; правая колонка - управление
+         (Hide HUD / ADD KEYFRAME / PLAY by TIME / Play / Stop) + MAP + экспорт -->
+    <Grid Grid.Row="1" Margin="3,0,3,6">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="5*"/>
-        <ColumnDefinition Width="1.5*"/>
+        <ColumnDefinition Width="2*"/>
       </Grid.ColumnDefinitions>
-      <Grid Margin="0,0,6,0">
+      <Grid Grid.Column="0" Margin="0,0,6,0">
         <Grid.RowDefinitions>
-          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
           <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
-        <Border Grid.Row="0" CornerRadius="8" Background="#6C71C4" Margin="0,0,0,6" Padding="8,4">
-          <Grid>
-            <Grid.RowDefinitions>
-              <RowDefinition Height="Auto"/>
-              <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
-            <TextBlock Text="🕐 FLIGHT TIME, SEC — whole path in N seconds" Foreground="#C9CCEF" FontSize="11" Visibility="Collapsed"/>
-            <Grid Grid.Row="1">
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-              </Grid.ColumnDefinitions>
-              <Button Name="BtnPathPlay" Content="▶  PLAY (by TIME)" Background="Transparent" BorderThickness="0"
-                      Foreground="White" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand"
-                      HorizontalContentAlignment="Left" Padding="10,4" ToolTipService.ShowOnDisabled="True"/>
-              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,4,0">
-                <TextBox Name="TbSeconds" Text="15" Width="62" Height="32" FontSize="16" FontWeight="Bold"
-                         Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
-                         HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
-                <TextBlock Name="TxSec" Text="sec" Foreground="#D0D3F0" FontSize="13" VerticalAlignment="Center" Margin="6,0,0,0"/>
-              </StackPanel>
-            </Grid>
-          </Grid>
-        </Border>
-        <Button Name="BtnPathPlaySpeed" Grid.Row="1" Content="▶  PLAY (by keyframe SPEEDS)" Background="#CBA6F7"
-                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
-                HorizontalContentAlignment="Left" Padding="18,4" ToolTipService.ShowOnDisabled="True"/>
-      </Grid>
-      <Button Name="BtnPathStop" Grid.Column="1" Content="■  Stop" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
-    </Grid>
-
-    <!-- clear -->
-    <!-- (clear = trash icon inside the table, bottom-left) -->
-
-    <!-- keyframes table + map/export panel -->
-    <TextBlock Grid.Row="6" Name="TxFramesLabel" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
-    <Grid Grid.Row="7" Margin="3,0,3,6">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="5*"/>
-        <ColumnDefinition Width="1.5*"/>
-      </Grid.ColumnDefinitions>
-      <DataGrid Name="DgKeys" Margin="0,0,6,0" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
+        <TextBlock Grid.Row="0" Name="TxFramesLabel" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
+        <Grid Grid.Row="1">
+      <DataGrid Name="DgKeys" Margin="0,3,0,0" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
               FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
@@ -1217,15 +1164,15 @@ function Send-PathSaveAndSync([string]$prefix) {
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
-        <DataGridTextColumn Header="Time" Width="66" Binding="{Binding Time}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="X" Width="64" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Y" Width="64" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Z" Width="64" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Yaw" Width="62" Binding="{Binding Yaw}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Pitch" Width="56" Binding="{Binding Pitch}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="FOV" Width="48" Binding="{Binding FOV}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Time" Width="60" Binding="{Binding Time}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="X" Width="56" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Y" Width="56" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Z" Width="56" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Yaw" Width="56" Binding="{Binding Yaw}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Pitch" Width="48" Binding="{Binding Pitch}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="FOV" Width="40" Binding="{Binding FOV}" IsReadOnly="True"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
-        <DataGridTemplateColumn Width="30">
+        <DataGridTemplateColumn Width="28">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <!-- v5.17.11.7: значок-глаз "посмотреть как выглядит кадр" (goto, вместо
@@ -1239,7 +1186,7 @@ function Send-PathSaveAndSync([string]$prefix) {
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
-        <DataGridTemplateColumn Width="36">
+        <DataGridTemplateColumn Width="32">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <Button Content="🗑" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
@@ -1261,8 +1208,42 @@ function Send-PathSaveAndSync([string]$prefix) {
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
               Background="#EB6F8E" Foreground="White"
               BorderThickness="0" Cursor="Hand" ToolTip="{DynamicResource TipClear}" ToolTipService.ShowOnDisabled="True"/>
+        </Grid>
+      </Grid>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
-        <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
+        <Button Name="BtnHudHide" Content="🙈  Hide HUD" Height="34" Margin="0,0,0,6"
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
+        <Button Name="BtnPathAdd" Content="📷  ADD KEYFRAME" Height="52" Margin="0,0,0,6"
+                Background="#3FA85C" Foreground="White" FontSize="16" FontWeight="Bold"/>
+        <Border CornerRadius="8" Background="#6C71C4" Margin="0,0,0,6" Padding="8,4">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Text="🕐 FLIGHT TIME, SEC — whole path in N seconds" Foreground="#C9CCEF" FontSize="11" Visibility="Collapsed"/>
+            <Grid Grid.Row="1">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Button Name="BtnPathPlay" Content="▶  PLAY by TIME" Background="Transparent" BorderThickness="0"
+                      Foreground="White" FontSize="14" FontWeight="Bold" HorizontalAlignment="Stretch" Cursor="Hand"
+                      HorizontalContentAlignment="Left" Padding="8,4" ToolTipService.ShowOnDisabled="True"/>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,4,0">
+                <TextBox Name="TbSeconds" Text="15" Width="44" Height="28" FontSize="14" FontWeight="Bold"
+                         Background="#464B8B" Foreground="White" BorderBrush="#9A9FDB" BorderThickness="1"
+                         HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+                <TextBlock Name="TxSec" Text="sec" Foreground="#D0D3F0" FontSize="11" VerticalAlignment="Center" Margin="4,0,0,0"/>
+              </StackPanel>
+            </Grid>
+          </Grid>
+        </Border>
+        <Button Name="BtnPathPlaySpeed" Content="▶  Play" Background="#CBA6F7"
+                Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
+                HorizontalContentAlignment="Left" Padding="18,4" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
+        <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
+        <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,10,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
                    TextWrapping="Wrap" Margin="2,0,0,10"/>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
@@ -1278,7 +1259,7 @@ function Send-PathSaveAndSync([string]$prefix) {
          на самой строке (см. колонку перед корзиной) -->
 
     <!-- parameters: two rows (FOV / Fly speed) on shared columns, so key/ALL buttons align by X -->
-    <Grid Grid.Row="9" Margin="3,0,3,6">
+    <Grid Grid.Row="2" Margin="3,0,3,6">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
@@ -1305,7 +1286,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     </Grid>
 
     <!-- status + transparency -->
-    <Grid Grid.Row="10" Margin="3,2,3,0">
+    <Grid Grid.Row="3" Margin="3,2,3,0">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="*"/>
@@ -2200,8 +2181,8 @@ $script:LocData = @{
     en = @{
         HudHide = "🙈  Hide HUD"; HudShow = "👁  Show HUD"
         AddKey = "📷  ADD KEYFRAME"
-        PlayTime = "▶  PLAY (by TIME)"; Sec = "sec"
-        PlaySpeed = "▶  PLAY (by keyframe SPEEDS)"; Stop = "■  Stop"
+        PlayTime = "▶  PLAY by TIME"; Sec = "sec"
+        PlaySpeed = "▶  Play"; Stop = "■  Stop"
         Keyframes = "▦ KEYFRAMES (double-click = go to key)"
         NoMap = "(no map)"; Map = "🗺 MAP"
         Export = "↗  Export to file"; Import = "↙  Import from file"
@@ -2223,14 +2204,16 @@ $script:LocData = @{
         TipDelRow = "delete this keyframe"
         TipRefresh = "Full table resync (full memory scan)"
         TipClear = "Clear table (delete ALL keyframes)"
+        TipHide = "Hide panel (Ctrl+Alt+H - return)"
+        TipLang = "Language"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
     ru = @{
         HudHide = "🙈  Скрыть HUD"; HudShow = "👁  Показать HUD"
         AddKey = "📷  ДОБАВИТЬ КАДР"
-        PlayTime = "▶  ВОСПРОИЗВЕСТИ (по времени)"; Sec = "сек"
-        PlaySpeed = "▶  ВОСПРОИЗВЕСТИ (по скоростям кадров)"; Stop = "■  Стоп"
+        PlayTime = "▶  ВОСПРОИЗВЕСТИ по времени"; Sec = "сек"
+        PlaySpeed = "▶  Проиграть (по скоростям)"; Stop = "■  Стоп"
         Keyframes = "▦ КАДРЫ (двойной клик = перейти к кадру)"
         NoMap = "(нет карты)"; Map = "🗺 КАРТА"
         Export = "↗  Экспорт в файл"; Import = "↙  Импорт из файла"
@@ -2252,6 +2235,8 @@ $script:LocData = @{
         TipDelRow = "удалить этот кадр"
         TipRefresh = "Полный ре-синк таблицы (полное сканирование памяти)"
         TipClear = "Очистить таблицу (удалить ВСЕ кадры)"
+        TipHide = "Скрыть панель (Ctrl+Alt+H - вернуть)"
+        TipLang = "Язык"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
@@ -2263,7 +2248,7 @@ function Set-Lang([string]$lang) {
     # v5.17.11.8: тултипы кнопок ВНУТРИ DataTemplate (плюсики/глаз/корзина на строках)
     # локализуются через ресурсы окна: в шаблоне - DynamicResource, а на поимённые
     # кнопки из PS не попасть (строки генерируются)
-    foreach ( $kv in @('TipInsertRow','TipGotoRow','TipDelRow','TipRefresh','TipClear') ) {
+    foreach ( $kv in @('TipInsertRow','TipGotoRow','TipDelRow','TipRefresh','TipClear','TipHide','TipLang') ) {
         try { $window.Resources[$kv] = $L.$kv } catch { }
     }
     Update-HudButton
