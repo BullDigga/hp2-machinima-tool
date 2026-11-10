@@ -970,6 +970,7 @@ function Send-PathSaveAndSync([string]$prefix) {
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
         <Image Name="ImgOwl" Width="26" Height="26" Margin="2,0,8,0"/>
@@ -1077,9 +1078,9 @@ function Send-PathSaveAndSync([string]$prefix) {
       </Button>
       <Button Name="BtnTheme" Grid.Column="3" Content="☀" Width="34" Height="30" FontSize="14" BorderThickness="0"
               Margin="0,0,12,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
-      <Button Name="BtnHide" Grid.Column="4" Content="Hide" Width="52" Height="30" FontSize="12" BorderThickness="0"
-              Margin="0,0,10,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
-              ToolTip="hide the panel - Ctrl+Alt+H brings it back"/>
+      <Button Name="BtnHide" Grid.Column="4" Content="_" Width="34" Height="30" FontWeight="Bold" FontSize="16" BorderThickness="0"
+              Margin="0,0,10,0" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" Padding="0,2,0,0"
+              ToolTip="Скрыть панель / Hide panel (Ctrl+Alt+H - вернуть)"/>
       <Button Name="BtnClose" Grid.Column="5" Content="✕" Width="34" Height="30" FontWeight="Bold" FontSize="14"
               Background="#EB6F8E" Foreground="White" BorderThickness="0"/>
     </Grid>
@@ -1643,11 +1644,23 @@ $controls['BtnHide'].Add_Click({
     # v5.17.9: ghost instead of $window.Hide(): with the AllowsTransparency window the
     # real Hide SILENTLY KILLED the process ~3s later (3 reproductions, empty crash.log -
     # native render death). Ghost keeps the HWND alive for WPF: fully transparent,
-    # click-through, not topmost. Ctrl+Alt+H (hotkey id 5) restores it.
+    # click-through, not topmost. ПАНЕЛЬ ОСТАЁТСЯ В ТАСКБАРЕ - клик по нему возвращает
+    # (см. Add_Activated ниже). Ctrl+Alt+H (hotkey id 5) тоже.
     $window.Topmost = $false
     $window.Opacity = 0
     $window.IsHitTestVisible = $false
-    $window.ShowInTaskbar = $false
+    $window.ShowInTaskbar = $true
+})
+# клик по значку в таскбаре активирует окно -> снимаем ghost немедленно
+$window.Add_Activated({
+    try {
+        if ( $window.Opacity -eq 0 ) {
+            $window.Topmost = $true
+            $window.Opacity = 1
+            $window.IsHitTestVisible = $true
+            $window.ShowInTaskbar = $true
+        }
+    } catch { }
 })
 $controls['BtnClose'].Add_Click({ $window.Close() })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
@@ -2024,7 +2037,6 @@ function Set-Lang([string]$lang) {
     if ( -not $script:Playing ) { $controls['BtnPathStop'].Content = $L.Stop }
     $controls['BtnExport'].Content = $L.Export
     $controls['BtnImport'].Content = $L.Import
-    $controls['BtnHide'].Content = $L.HideBtn
     $controls['BtnGoto'].Content = $L.Goto
     $controls['BtnSetFov'].Content = $L.SetFov
     $controls['BtnFovKey'].Content = $L.FovKey
