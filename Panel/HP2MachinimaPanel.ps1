@@ -876,6 +876,7 @@ function Send-PathSaveAndSync([string]$prefix) {
     <SolidColorBrush x:Key="HdrBrush" Color="#FF313244"/>
     <SolidColorBrush x:Key="SelBrush" Color="#FF3D4A66"/>
     <SolidColorBrush x:Key="StatusWarnBrush" Color="#FFFAB387"/>
+    <SolidColorBrush x:Key="StatusErrBrush" Color="#FFE5484D"/>
     <BooleanToVisibilityConverter x:Key="BoolToVis"/>
 
     <Style TargetType="Button">
@@ -1306,9 +1307,25 @@ function Send-PathSaveAndSync([string]$prefix) {
       </Grid.ColumnDefinitions>
       <Ellipse Name="StatusDot" Width="10" Height="10" Fill="{DynamicResource DotBrush}" VerticalAlignment="Center" Margin="0,0,8,0"/>
       <TextBlock Name="TbStatus" Grid.Column="1" Text="ready" Foreground="{DynamicResource StatusBrush}" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
-      <CheckBox Name="CbTransparent" Grid.Column="2" Content="Transparent" Foreground="{DynamicResource MutedBrush}"
-                FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
+      <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="8,0,0,0">
+        <!-- v5.17.14 (#10): кнопка-иконка GitHub - открывает репозиторий -->
+        <Button Name="BtnGithub" Width="34" Height="26" Background="Transparent" BorderThickness="0" Cursor="Hand"
+                ToolTip="{DynamicResource TipGithub}" Margin="0,0,6,0">
+          <Path Data="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+                Fill="{DynamicResource TextBrush}" Stretch="Uniform" Width="16" Height="16"/>
+        </Button>
+        <CheckBox Name="CbTransparent" Content="Transparent" Foreground="{DynamicResource MutedBrush}"
+                  FontSize="12" VerticalAlignment="Center" Margin="8,0,0,0"/>
+      </StackPanel>
     </Grid>
+    <!-- v5.17.14 (#6): журнал последних логов - раскрывается при наведении на статус -->
+    <Popup x:Name="LogPopup" PlacementTarget="{Binding ElementName=TbStatus}" Placement="Top" StaysOpen="True" AllowsTransparency="True" VerticalOffset="6">
+      <Border Name="LogPopupBorder" CornerRadius="8" Background="{DynamicResource PanelBrush}" BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Padding="8" MinWidth="440" MaxWidth="620">
+        <TextBox Name="TbLogHistory" IsReadOnly="True" FontFamily="Consolas" FontSize="11" MaxHeight="210" MinWidth="420"
+                 Background="Transparent" Foreground="{DynamicResource TextBrush}" BorderThickness="0"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
+      </Border>
+    </Popup>
   </Grid>
   </AdornerDecorator>
 </Window>
@@ -1318,18 +1335,36 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnHide','BtnClose','TbStatus','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
 # v5.17.7: kind="warn" красит статус ОРАНЖЕВЫМ (идёт печать команд в игру),
-# по умолчанию - обычный зелёный
+# v5.17.14 (#7): kind="err" красит КРАСНЫМ (не видно активного окна игры),
+# по умолчанию - обычный зелёный.
+# v5.17.14 (#6): каждый статус пишется в журнал (со временем; в обычной строке
+# время не показывается) - при наведении на статус раскрывается журнал
+$script:StatusLog = New-Object System.Collections.Generic.List[string]
 function Set-Status([string]$s, [string]$kind = "ok") {
     $script:StatusKind = $kind
     $controls['TbStatus'].Text = $s
     $sk = "StatusBrush"
     if ( $kind -eq "warn" ) { $sk = "StatusWarnBrush" }
+    if ( $kind -eq "err" ) { $sk = "StatusErrBrush" }
     try { $controls['TbStatus'].Foreground = $window.Resources[$sk] } catch { }
+    try {
+        # дубли подряд (полл статуса раз в 5.4с) в журнал не пишем - шум
+        $dup = $false
+        if ( $script:StatusLog.Count -gt 0 -and $script:StatusLog[$script:StatusLog.Count-1].EndsWith("  " + $s) ) { $dup = $true }
+        if ( -not $dup ) {
+            $script:StatusLog.Add((Get-Date -Format "HH:mm:ss") + "  " + $s)
+            while ( $script:StatusLog.Count -gt 100 ) { $script:StatusLog.RemoveAt(0) }
+        }
+        if ( $controls['LogPopup'].IsOpen ) {
+            $controls['TbLogHistory'].Text = ($script:StatusLog -join "`n")
+            $controls['TbLogHistory'].ScrollToEnd()
+        }
+    } catch { }
 }
 
 function Get-MapText {
@@ -1431,8 +1466,11 @@ function Do-PathPlay {
         return
     }
     # speed-driven playback: длительность сегментов = дистанция / скорость кадра
+    # v5.17.14 (#8): Stop активен СРАЗУ, до ввода команд (команда печатается секунды)
+    $controls['BtnPathStop'].IsEnabled = $true
     $st = Send-GameCommand "PathPlaySpeed"
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback (Get-PathTotalDur) }
+    else { if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false } }
     Set-Status $st
 }
 function Do-PathPlayTime {
@@ -1445,8 +1483,11 @@ function Do-PathPlayTime {
     # равномерный режим: весь путь за N секунд из поля FLIGHT TIME
     $sec = $controls['TbSeconds'].Text.Trim()
     if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
+    # v5.17.14 (#8): Stop активен СРАЗУ, до ввода команд
+    $controls['BtnPathStop'].IsEnabled = $true
     $st = Send-GameCommand "PathPlay $sec"
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback ([double]$sec) }
+    else { if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false } }
     Set-Status $st
 }
 # HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ; панель помнит состояние, кнопка одна и меняет подпись
@@ -2017,6 +2058,32 @@ function Set-Theme([bool]$dark) {
 }
 $controls['BtnTheme'].Add_Click({ Set-Theme (-not $script:DarkTheme) })
 
+# v5.17.14 (#10): кнопка GitHub - открыть репозиторий
+$controls['BtnGithub'].Add_Click({ Start-Process "https://github.com/BullDigga/hp2-machinima-tool" })
+
+# v5.17.14 (#6): журнал логов - наведение на статус раскрывает попап с историей
+# (строки со временем); закрытие с задержкой, чтобы курсор успел перейти в попап
+$controls['TbStatus'].Add_MouseEnter({
+    try {
+        $controls['TbLogHistory'].Text = ($script:StatusLog -join "`n")
+        $controls['TbLogHistory'].ScrollToEnd()
+        $controls['LogPopup'].IsOpen = $true
+    } catch { }
+})
+$script:LogCloseTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:LogCloseTimer.Interval = [TimeSpan]::FromMilliseconds(350)
+$script:LogCloseTimer.Add_Tick({
+    $script:LogCloseTimer.Stop()
+    try {
+        if ( -not $controls['LogPopupBorder'].IsMouseOver -and -not $controls['TbStatus'].IsMouseOver ) {
+            $controls['LogPopup'].IsOpen = $false
+        }
+    } catch { }
+})
+$controls['TbStatus'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $script:LogCloseTimer.Start() })
+$controls['LogPopupBorder'].Add_MouseEnter({ $script:LogCloseTimer.Stop() })
+$controls['LogPopupBorder'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $script:LogCloseTimer.Start() })
+
 # ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
 $script:SelDep = @('BtnFovKey','BtnKeySpeed')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
@@ -2026,6 +2093,19 @@ $script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed'
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 function Update-SelectionButtons {
+    # v5.17.14 (#8): ветка ИГРАЕТ проверяется ПЕРВОЙ и безусловно - иначе синк или
+    # 5.4с-полл со сбойным сканом (CurrentMap слетел в "") гасили Stop посреди
+    # проигрывания, а через несколько секунд полл его возвращал
+    if ( $script:Playing ) {
+        foreach ( $b in $script:PlayLock ) {
+            try { $controls[$b].IsEnabled = $false } catch { }
+        }
+        $controls['BtnExport'].IsEnabled = $true
+        $controls['BtnPathStop'].IsEnabled = $true
+        $controls['BtnPathPlay'].IsEnabled = $true
+        $controls['BtnPathPlaySpeed'].IsEnabled = $true
+        return
+    }
     # v5.15: игра не на карте (закрыта или меню) - доступна только Прозрачность и поле
     # секунд; таблица с кадрами остаётся живой ради оффлайн-удаления
     $gameOn = ($script:CurrentMap -ne "")
@@ -2046,17 +2126,6 @@ function Update-SelectionButtons {
                 try { $controls[$b].ToolTip = $L.TipNoGame } catch { }
             }
         }
-        return
-    }
-    $play = [bool]$script:Playing
-    foreach ( $b in $script:PlayLock ) {
-        try { $controls[$b].IsEnabled = (-not $play) } catch { }
-    }
-    if ( $play ) {
-        $controls['BtnExport'].IsEnabled = $true
-        $controls['BtnPathStop'].IsEnabled = $true
-        $controls['BtnPathPlay'].IsEnabled = $true
-        $controls['BtnPathPlaySpeed'].IsEnabled = $true
         return
     }
     $has = $controls['DgKeys'].SelectedItem -ne $null
@@ -2197,11 +2266,12 @@ $script:UiTimer.Add_Tick({
     if ( $script:GamePoll -eq 0 -and -not $script:SyncBusy ) {
         $g = Get-Process Game -ErrorAction SilentlyContinue
         if ( $g -eq $null ) {
+            # v5.17.14 (#7): игра не запущена - статус КРАСНЫМ, постоянно (каждый полл)
+            Set-Status $script:LocData[$script:Lang].TipNoWindow "err"
             if ( $script:CurrentMap -ne "" -or $script:Playing ) {
                 $script:CurrentMap = ""
                 if ( $script:Playing ) { Set-Playing $false }
                 Update-SelectionButtons
-                Set-Status "game closed"
             }
         } elseif ( $script:CurrentMap -eq "" ) {
             # v5.17.1: карта не определена - запрашиваем у игры снапшот: без -log буфер
@@ -2243,6 +2313,8 @@ $script:LocData = @{
         TipClear = "Clear table (delete ALL keyframes)"
         TipHide = "Hide panel (Ctrl+Alt+H - return)"
         TipLang = "Language"
+        TipGithub = "Open the GitHub repository"
+        TipNoWindow = "can't see the game window"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -2274,6 +2346,8 @@ $script:LocData = @{
         TipClear = "Очистить таблицу (удалить ВСЕ кадры)"
         TipHide = "Скрыть панель (Ctrl+Alt+H - вернуть)"
         TipLang = "Язык"
+        TipGithub = "Открыть репозиторий на GitHub"
+        TipNoWindow = "не видно активного окна игры"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
@@ -2285,7 +2359,7 @@ function Set-Lang([string]$lang) {
     # v5.17.11.8: тултипы кнопок ВНУТРИ DataTemplate (плюсики/глаз/корзина на строках)
     # локализуются через ресурсы окна: в шаблоне - DynamicResource, а на поимённые
     # кнопки из PS не попасть (строки генерируются)
-    foreach ( $kv in @('TipInsertRow','TipGotoRow','TipDelRow','TipRefresh','TipClear','TipHide','TipLang') ) {
+    foreach ( $kv in @('TipInsertRow','TipGotoRow','TipDelRow','TipRefresh','TipClear','TipHide','TipLang','TipGithub') ) {
         try { $window.Resources[$kv] = $L.$kv } catch { }
     }
     Update-HudButton
