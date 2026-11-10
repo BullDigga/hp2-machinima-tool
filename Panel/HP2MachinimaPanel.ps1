@@ -6,6 +6,18 @@
 
 $ErrorActionPreference = "Stop"
 
+# v5.17.10.1: свой AppUserModelID ДО любого окна - без него таскбар приколачивает
+# кнопку панели к AUMID powershell.exe и показывает его значок, игнорируя Window.Icon
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class ShellId {
+    [DllImport("shell32.dll", SetLastError=false)]
+    public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+}
+"@
+[ShellId]::SetCurrentProcessExplicitAppUserModelID("BullDigga.HP2MachinimaPanel") | Out-Null
+
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 Add-Type -TypeDefinition @"
