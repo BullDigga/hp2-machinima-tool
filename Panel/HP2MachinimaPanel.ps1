@@ -1203,7 +1203,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <Button x:Name="PillBtn" Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
                         Width="16" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
                         Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Top"
-                        Margin="22,-6,0,0" ToolTip="insert CURRENT camera keyframe here (between this and the previous row)"
+                        Margin="22,-6,0,0" ToolTip="{DynamicResource TipInsertRow}"
                         Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource BoolToVis}}"/>
                 <!-- у строки 0 глиф "+" рисует АДОРНЕР (верхняя половина пилюли лежит НА
                      шапке, кнопка клипуется вьюпортом) - глушим глиф кнопки, Content="+"
@@ -1234,7 +1234,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                    Появляется при наведении на строку, слева от корзины. Клик = PathGoto Num -->
               <Button Content="&#xE7B3;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="14" Cursor="Hand" BorderThickness="0"
                       Background="Transparent" Foreground="#2196F3" HorizontalAlignment="Center" Padding="2,0"
-                      ToolTip="preview this keyframe (jump the camera to it)"
+                      ToolTip="{DynamicResource TipGotoRow}"
                       Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
@@ -1244,6 +1244,7 @@ function Send-PathSaveAndSync([string]$prefix) {
             <DataTemplate>
               <Button Content="🗑" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
                       Background="Transparent" Foreground="#EB6F8E" HorizontalAlignment="Center" Padding="2,0"
+                      ToolTip="{DynamicResource TipDelRow}"
                       Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
@@ -1253,13 +1254,13 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Name="BtnRefresh" Width="34" Height="34" FontSize="17" FontWeight="Bold"
               HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,16,8"
               Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource NavBrush}"
-              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="Full table resync (full memory scan)" ToolTipService.ShowOnDisabled="True">
+              BorderBrush="{DynamicResource LineBrush}" BorderThickness="1" Cursor="Hand" ToolTip="{DynamicResource TipRefresh}" ToolTipService.ShowOnDisabled="True">
         <TextBlock Text="⟳"/>
       </Button>
       <Button Name="BtnPathClear" Content="🗑" Width="30" Height="30" FontSize="14"
               HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="8,0,0,8"
               Background="#EB6F8E" Foreground="White"
-              BorderThickness="0" Cursor="Hand" ToolTip="Clear table (delete ALL keyframes)" ToolTipService.ShowOnDisabled="True"/>
+              BorderThickness="0" Cursor="Hand" ToolTip="{DynamicResource TipClear}" ToolTipService.ShowOnDisabled="True"/>
       <StackPanel Grid.Column="1" Margin="10,0,0,0">
         <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,3"/>
         <TextBlock Name="TbMap" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
@@ -2217,6 +2218,11 @@ $script:LocData = @{
         OneKey = "only 1 key - jumped to it"
         TipWrongMap = "Keyframes belong to a different map - load it or clear the table"
         TipNoGame = "The game is not running on a level - launch the game and load a map"
+        TipInsertRow = "insert CURRENT camera keyframe here (between this and the previous row)"
+        TipGotoRow = "preview this keyframe (jump the camera to it)"
+        TipDelRow = "delete this keyframe"
+        TipRefresh = "Full table resync (full memory scan)"
+        TipClear = "Clear table (delete ALL keyframes)"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -2241,6 +2247,11 @@ $script:LocData = @{
         OneKey = "всего один кадр - перешли к нему"
         TipWrongMap = "Кадры с другой карты - загрузите её или очистите таблицу"
         TipNoGame = "Игра не запущена на уровне - запусти игру и выбери карту"
+        TipInsertRow = "вставить ТЕКУЩИЙ кадр камеры сюда (между этой и предыдущей строкой)"
+        TipGotoRow = "посмотреть, как выглядит этот кадр (камера перейдёт к нему)"
+        TipDelRow = "удалить этот кадр"
+        TipRefresh = "Полный ре-синк таблицы (полное сканирование памяти)"
+        TipClear = "Очистить таблицу (удалить ВСЕ кадры)"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
@@ -2249,6 +2260,12 @@ $script:Lang = "en"
 function Set-Lang([string]$lang) {
     $script:Lang = $lang
     $L = $script:LocData[$lang]
+    # v5.17.11.8: тултипы кнопок ВНУТРИ DataTemplate (плюсики/глаз/корзина на строках)
+    # локализуются через ресурсы окна: в шаблоне - DynamicResource, а на поимённые
+    # кнопки из PS не попасть (строки генерируются)
+    foreach ( $kv in @('TipInsertRow','TipGotoRow','TipDelRow','TipRefresh','TipClear') ) {
+        try { $window.Resources[$kv] = $L.$kv } catch { }
+    }
     Update-HudButton
     $controls['BtnPathAdd'].Content = $L.AddKey
     $controls['BtnPathPlay'].Content = $L.PlayTime
