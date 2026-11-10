@@ -251,13 +251,26 @@ function Find-GameWindow {
     return [IntPtr]::Zero
 }
 
+function Pump-Dispatcher {
+    # v5.17.6: прокачка dispatcher'а во время долгой печати команд - UI-поток спит
+    # в Start-Sleep и спиннер не крутится; PushFrame даёт отрисовке дойти до экрана
+    try {
+        $pumpFrame = New-Object System.Windows.Threading.DispatcherFrame
+        [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke([Action]{ $pumpFrame.Continue = $false }, [System.Windows.Threading.DispatcherPriority]::Background) | Out-Null
+        [System.Windows.Threading.Dispatcher]::PushFrame($pumpFrame)
+    } catch { }
+}
+
 function Type-Command([string]$cmd) {
     # unicode-ввод: не зависит от раскладки клавиатуры.
     # v5.17.2: 20мс/символ и 260мс после Enter - при быстрой печати длинных пачек команд
     # (импорт) консоль теряла символы и Enters, значения кадров мутировали
+    $ti = 0
     foreach ($ch in $cmd.ToCharArray()) {
         [GameCtl]::TapChar($ch)
         Start-Sleep -Milliseconds 20
+        $ti++
+        if ( ($ti % 5) -eq 0 ) { Pump-Dispatcher }
     }
 }
 
@@ -276,33 +289,44 @@ function Focus-GameWindow([IntPtr]$h) {
     return ([GameCtl]::GetForegroundWindow() -eq $h)
 }
 
+$script:SendBusy = $false
 function Send-GameCommands([string[]]$cmds) {
-    Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
-    $h = Find-GameWindow
-    if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
-    if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
-    # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
-    # Обычный ` остаётся терминалом пользователя.
-    [GameCtl]::KeyDown([uint16]0x10)
-    [GameCtl]::Tap([uint16]$VK['grave'])
-    [GameCtl]::KeyUp([uint16]0x10)
-    Start-Sleep -Milliseconds 120
-    foreach ($c in $cmds) {
-        Type-Command $c
-        [GameCtl]::Tap([uint16]$VK['enter'])
-        Start-Sleep -Milliseconds 260
+    # v5.17.6: защита от повторного клика во время печати + Pump-Dispatcher
+    # прокачивает отрисовку - спиннер крутится СРАЗУ и НЕ ЗАМИРАЕТ на весь ввод
+    if ( $script:SendBusy ) { return "busy - command still sending" }
+    $script:SendBusy = $true
+    try {
+        Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
+        $h = Find-GameWindow
+        if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
+        if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
+        # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
+        # Обычный ` остаётся терминалом пользователя.
+        [GameCtl]::KeyDown([uint16]0x10)
+        [GameCtl]::Tap([uint16]$VK['grave'])
+        [GameCtl]::KeyUp([uint16]0x10)
+        Start-Sleep -Milliseconds 120
+        Pump-Dispatcher
+        foreach ($c in $cmds) {
+            Type-Command $c
+            [GameCtl]::Tap([uint16]$VK['enter'])
+            Start-Sleep -Milliseconds 260
+            Pump-Dispatcher
+        }
+        [GameCtl]::Tap([uint16]$VK['grave'])
+        Start-Sleep -Milliseconds 80
+        # одиночные команды без последующего синка: гасим спиннер сами (синк делает это раньше, если запущен)
+        $script:SpinStopTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:SpinStopTimer.Interval = [TimeSpan]::FromMilliseconds(1400)
+        $script:SpinStopTimer.Add_Tick({
+            $script:SpinStopTimer.Stop()
+            if ( -not $script:SyncBusy ) { Stop-Spin }
+        })
+        $script:SpinStopTimer.Start()
+        return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
+    } finally {
+        $script:SendBusy = $false
     }
-    [GameCtl]::Tap([uint16]$VK['grave'])
-    Start-Sleep -Milliseconds 80
-    # одиночные команды без последующего синка: гасим спиннер сами (синк делает это раньше, если запущен)
-    $script:SpinStopTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:SpinStopTimer.Interval = [TimeSpan]::FromMilliseconds(1400)
-    $script:SpinStopTimer.Add_Tick({
-        $script:SpinStopTimer.Stop()
-        if ( -not $script:SyncBusy ) { Stop-Spin }
-    })
-    $script:SpinStopTimer.Start()
-    return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
 }
 
 function Send-GameCommand([string]$cmd) { return Send-GameCommands @($cmd) }
@@ -1364,6 +1388,11 @@ function Update-ParamBox([string]$which) {
     $key = if ( $box.Text.Trim() -eq $applied ) { "SyncBrush" } else { "DirtyBrush" }
     $box.Background = $window.Resources[$key]
     $btn.IsEnabled = ($key -eq "DirtyBrush")
+    # v5.17.6: FOV->key / Speed->key зависят ещё и от значения выбранной строки -
+    # правка поля меняет доступность кнопок на лету
+    try {
+        if ( $controls['DgKeys'].SelectedItem -ne $null ) { Update-SelectionButtons }
+    } catch { }
 }
 $controls['TbFov'].Add_TextChanged({ Update-ParamBox "fov" })
 $controls['TbSpeed'].Add_TextChanged({ Update-ParamBox "speed" })
@@ -1673,6 +1702,16 @@ function Update-SelectionButtons {
     foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
     $controls['BtnPathClear'].IsEnabled = ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = $false
+    # v5.17.6: FOV->key / Speed->key серые, если выбранная строка УЖЕ имеет значение из поля
+    try {
+        $selRow = $controls['DgKeys'].SelectedItem
+        if ( $selRow -ne $null ) {
+            $fovTxt = $controls['TbFov'].Text.Trim()
+            $spdTxt = $controls['TbSpeed'].Text.Trim()
+            $controls['BtnFovKey'].IsEnabled = ( ($fovTxt -match '^\d+(\.\d+)?$') -and ([double]$fovTxt -ne $selRow.FOV) )
+            $controls['BtnKeySpeed'].IsEnabled = ( ($spdTxt -match '^\d+(\.\d+)?$') -and ([double]$spdTxt -ne $selRow.Speed) )
+        }
+    } catch { }
     $L = $null
     if ( $script:LocData -ne $null ) { $L = $script:LocData[$script:Lang] }
     if ( $L -ne $null ) {
@@ -1683,6 +1722,24 @@ function Update-SelectionButtons {
     }
 }
 $controls['DgKeys'].Add_SelectionChanged({ Update-SelectionButtons })
+# v5.17.6: клик по пустому месту таблицы (мимо строк) снимает выделение -
+# кнопки редактирования и перехода сразу сереют
+$controls['DgKeys'].AddHandler([System.Windows.UIElement]::MouseLeftButtonDownEvent, [System.Windows.Input.MouseButtonEventHandler]{
+    param($s, $e)
+    try {
+        $hit = $controls['DgKeys'].InputHitTest($e.GetPosition($controls['DgKeys']))
+        $cur = $hit
+        $inRow = $false
+        while ( $cur -ne $null ) {
+            if ( $cur -is [System.Windows.Controls.DataGridRow] -or $cur -is [System.Windows.Controls.Primitives.ScrollBar] ) { $inRow = $true; break }
+            $cur = [System.Windows.Media.VisualTreeHelper]::GetParent($cur)
+        }
+        if ( -not $inRow ) {
+            $controls['DgKeys'].SelectedIndex = -1
+            Update-SelectionButtons
+        }
+    } catch { }
+}, $true)
 Update-SelectionButtons
 
 # ---------- v5.8: ресайз окна за кромки - WindowChrome (ResizeBorderThickness=10) ----------
