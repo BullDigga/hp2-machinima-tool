@@ -480,7 +480,6 @@ function Refresh-Table {
     if ( $n -eq 0 ) {
         # v5.12: кадров нет - метка карты смысла не имеет, сбрасываем
         $script:KeyMap = ""
-        $controls['TbMap'].Text = Get-MapText
         Update-MapPreview
         Set-Status "table: 0 keyframes - press F8 in game to add"
     } else {
@@ -551,7 +550,6 @@ function Restore-KeysBackup {
         if ( $km -ne "" ) { $script:KeyMap = $km }
         foreach ( $k in $times.Keys ) { if ( -not $script:KeyTimes.ContainsKey($k) ) { $script:KeyTimes[$k] = $times[$k] } }
         Refresh-Table
-        $controls['TbMap'].Text = Get-MapText
         Update-MapPreview
         $hint = ""
         if ( $script:KeyMap -ne "" ) { $hint = " (" + $script:KeyMap + ")" }
@@ -904,7 +902,6 @@ function Complete-SyncFromLogInner {
         # текущая карта - из событий LoadMap в логе
         $lm = [regex]::Match($txt, 'LoadMap: ([A-Za-z0-9_]+)')
         if ( $lm.Success ) { $script:CurrentMap = $lm.Groups[1].Value }
-        $controls['TbMap'].Text = Get-MapText
         Update-MapPreview
 
         # v5.17.17: путь в игре ПУСТ (дамп 0 кадров), а в панели есть кадры той же
@@ -1367,32 +1364,24 @@ function Send-PathSaveAndSync([string]$prefix) {
                 Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
                 HorizontalContentAlignment="Left" Padding="18,4" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
-        <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,10,0,3"/>
-        <Grid Margin="2,0,0,10">
-          <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*"/>
-            <ColumnDefinition Width="Auto"/>
-          </Grid.ColumnDefinitions>
-          <TextBlock Name="TbMap" Grid.Column="0" Text="(no map)" Foreground="{DynamicResource TextBrush}" FontSize="14" FontWeight="Bold"
-                     TextWrapping="Wrap" VerticalAlignment="Center"/>
-          <!-- v5.17.13: превью карты из system/Thumbnails/<MapName>.bmp (120x90,
-               генерируется самой игрой для UI выбора карт), справа от названия -->
-          <Image Name="ImgMapPreview" Grid.Column="1" Width="72" Height="54" Stretch="Uniform"
-                 HorizontalAlignment="Right" VerticalAlignment="Top"/>
-        </Grid>
-        <Button Name="BtnMapSwitch" Height="64" Margin="0,0,0,10" HorizontalContentAlignment="Stretch"
-                Background="{DynamicResource PanelBrush}" ToolTip="{DynamicResource TipMapSwitch}" Cursor="Hand">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <Image Name="ImgSwitchThumb" Grid.Column="0" Width="72" Height="54" Stretch="Uniform"/>
-            <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-              <TextBlock Name="TbSwitchFriendly" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
-              <TextBlock Name="TbSwitchTech" FontSize="11" Foreground="{DynamicResource MutedBrush}"/>
-            </StackPanel>
-          </Grid>
+        <!-- v5.17.25: одна большая кнопка карты; заголовок "MAP" внутри кнопки,
+             старый отдельный блок (метка + название + превью) удалён как дубликат -->
+        <Button Name="BtnMapSwitch" Height="100" Margin="0,10,0,10" HorizontalContentAlignment="Stretch"
+                Background="{DynamicResource PanelBrush}" ToolTip="{DynamicResource TipMapSwitch}" Cursor="Hand" Padding="12,8">
+          <StackPanel>
+            <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,6" HorizontalAlignment="Left"/>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Image Name="ImgSwitchThumb" Grid.Column="0" Width="72" Height="54" Stretch="Uniform"/>
+              <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                <TextBlock Name="TbSwitchFriendly" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
+                <TextBlock Name="TbSwitchTech" FontSize="11" Foreground="{DynamicResource MutedBrush}"/>
+              </StackPanel>
+            </Grid>
+          </StackPanel>
         </Button>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
@@ -1470,7 +1459,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1514,10 +1503,9 @@ function Update-MapPreview {
     # v5.17.13: превью карты кадров из system/Thumbnails/<MapName>.bmp
     # (120x90 bmp, сама игра генерирует их для UI выбора карт). Нет файла -
     # картинка скрывается. v5.17.23: также большая кнопка Switch map (превью +
-    # понятное название + техническое имя файла)
+    # понятное название + техническое имя файла). v5.17.25: только большая
+    # кнопка - старый блок названия+превью удалён как дубликат
     try {
-        $img = $controls['ImgMapPreview']
-        if ( $img -eq $null ) { return }
         $map = $script:KeyMap
         $path = "F:\Harry Potter and the Chamber of Secrets\system\Thumbnails\" + $map + ".bmp"
         $hasThumb = ( $map -ne "" -and (Test-Path $path) )
@@ -1528,13 +1516,9 @@ function Update-MapPreview {
             $bmp.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
             $bmp.EndInit()
             $bmp.Freeze()
-            $img.Source = $bmp
-            $img.Visibility = [System.Windows.Visibility]::Visible
             $controls['ImgSwitchThumb'].Source = $bmp
             $controls['ImgSwitchThumb'].Visibility = [System.Windows.Visibility]::Visible
         } else {
-            $img.Source = $null
-            $img.Visibility = [System.Windows.Visibility]::Collapsed
             $controls['ImgSwitchThumb'].Source = $null
             $controls['ImgSwitchThumb'].Visibility = [System.Windows.Visibility]::Collapsed
         }
@@ -2533,7 +2517,13 @@ function Show-MapPicker {
         $win2.Title = "HP2 - " + $(if ( $ru ) { "Р’С‹Р±РѕСЂ РєР°СЂС‚С‹" } else { "Map Selector" })
         $win2.Width = 1060; $win2.Height = 920
         $win2.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
-        $win2.Left = $window.Left + 40; $win2.Top = $window.Top + 20
+        # v5.17.25: Left/Top главного окна бывают NaN (окно ещё не показано) -
+        # присваивание NaN кидает исключение и пикер "не нажимается"
+        if ( -not [double]::IsNaN($window.Left) -and -not [double]::IsNaN($window.Top) ) {
+            $win2.Left = $window.Left + 40; $win2.Top = $window.Top + 20
+        } else {
+            $win2.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+        }
         $win2.Topmost = $true
         $win2.Background = $window.Resources['TableBgBrush']
 
@@ -2567,7 +2557,7 @@ function Show-MapPicker {
         [System.Windows.Controls.Grid]::SetColumn($search, 1)
         $hdr.Children.Add($search) | Out-Null
         $tabs = New-Object System.Windows.Controls.StackPanel
-        $tabs.Orientation = [System.Windows.Orientation]::Horizontal
+        $tabs.Orientation = [System.Windows.Controls.Orientation]::Horizontal
         $tabs.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
         [System.Windows.Controls.Grid]::SetColumn($tabs, 2)
         $tabAll = New-Object System.Windows.Controls.Button
@@ -2648,7 +2638,10 @@ function Show-MapPicker {
 
         $win2.Content = $root2
         $win2.ShowDialog() | Out-Null
-    } catch { }
+    } catch {
+        # v5.17.25: тихий catch маскировал ошибки - кнопка выглядела мёртвой
+        Set-Status ("map picker error: " + $_.Exception.Message)
+    }
 }
 $controls['BtnMapSwitch'].Add_Click({ Show-MapPicker })
 $controls['DgKeys'].Add_MouseDoubleClick({
@@ -3082,7 +3075,6 @@ function Set-Lang([string]$lang) {
     $controls['TbMapLabel'].Text = $L.Map
     $controls['TxSec'].Text = $L.Sec
     $controls['TxFlySpeed'].Text = $L.FlySpeed
-    $controls['TbMap'].Text = Get-MapText
     Update-MapPreview
     # подсказки на серых кнопках
     foreach ( $b in @('BtnFovKey','BtnKeySpeed') ) { $controls[$b].ToolTip = $L.TipSelect }
