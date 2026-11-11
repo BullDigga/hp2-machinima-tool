@@ -440,7 +440,12 @@ function Confirm-GameActive {
 function Send-GameCommands([string[]]$cmds) {
     # v5.17.6: защита от повторного клика во время печати + Pump-Dispatcher
     # прокачивает отрисовку - спиннер крутится СРАЗУ и НЕ ЗАМИРАЕТ на весь ввод
-    if ( $script:SendBusy ) { return "busy - command still sending" }
+    if ( $script:SendBusy ) {
+        # v5.17.30.1: отказ был НЕВИДИМ - статус "typing..." оставался висеть, юзер
+        # жаловался "кадр не добавляется". Показываем warn прямо в статус
+        Set-Status "busy: the previous command is still sending - try again in a moment" "warn"
+        return "busy - command still sending"
+    }
     if ( -not $script:ConfirmBypass -and -not (Confirm-GameActive) ) { return "aborted: game not on a level" }
     # v5.17.27: фоновые зонды (ConfirmBypass: старт панели, 5.4с-полл в меню) обязаны
     # сфокусировать игру ради консоли, но не должны УВОДИТЬ фокус - жалоба юзера
@@ -1134,7 +1139,9 @@ function Complete-SyncFromLogInner {
             # явная очистка в игре - бэкап тоже пустеет
             Save-KeysBackup -ForceEmpty
         }
-        Set-Status "table: $($rows.Count) keys (memory scan OK)"
+        # v5.17.30.1: во время печати команд статус принадлежит пачке ("typing [i/N]") -
+        # не затираем его завершением скана (иначе юзер не видел отказ "busy")
+        if ( -not $script:SendBusy ) { Set-Status "table: $($rows.Count) keys (memory scan OK)" }
     }
 }
 
@@ -1153,19 +1160,25 @@ function Find-LogFile {
 
 function Sync-AfterCommand([string]$status) {
     # событие пишется в лог сразу после Enter - короткая пауза на всякий случай.
-    # v5.16.2: синхронизация ПОСЛЕ команды всегда полная: новое событие живёт в
-    # хвосте буфера, которого нет в кэшированных областях быстрого скана.
     # v5.17: перед синком запрашиваем у игры СНАПШОТ пути (PathDumpKeys): таблица
     # строится из дампа, а не из уцелевших обрывков кольцевого лог-буфера.
-    # v5.17.3: если синк отклонён (SyncBusy от предыдущего) - повторяем до 6 раз
+    # v5.16.2 делала синк ПОСЛЕ команды ВСЕГДА полным ("событие в хвосте буфера") -
+    # полный скан занимает 10-20с и каждая команда (F8!) висела в typing минуту.
+    # v5.17.30.1: быстрый скан ЛОВИТ новые события на стабильном буфере (фильтр
+    # newMax теперь учитывает gen), а буфер переезжает только при загрузке карты -
+    # это покрывают полл-форс (~54с) и отложенный полный рескан ниже (10с)
     Wait-Pump 120
     Send-GameCommands @("PathDumpKeys") | Out-Null
     Wait-Pump 120
     $tries = 0
-    while ( -not (Sync-FromLog -Force) -and $tries -lt 6 ) {
-        Wait-Pump 600
+    while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
+        Wait-Pump 300
         $tries++
     }
+    $tFs = New-Object System.Windows.Threading.DispatcherTimer
+    $tFs.Interval = [TimeSpan]::FromSeconds(10)
+    $tFs.Add_Tick({ param($s, $e) $s.Stop(); Sync-FromLog -Force })
+    $tFs.Start()
     if ( $status -ne "" ) { Set-Status $status }
 }
 
@@ -3521,7 +3534,7 @@ $script:UiTimer.Add_Tick({
     # - игра есть, уровень не определён -> полный рескан ловит MAP-событие уровня и разблокирует UI
     #   (иначе дедлок: кнопки заблокированы - синк сам не запустится)
     $script:GamePoll = ($script:GamePoll + 1) % 60
-    if ( $script:GamePoll -eq 0 -and -not $script:SyncBusy ) {
+    if ( $script:GamePoll -eq 0 ) {
         $g = Get-Process Game -ErrorAction SilentlyContinue
         if ( $g -eq $null ) {
             # v5.17.14 (#7): игра не запущена - статус КРАСНЫМ, постоянно (каждый полл)
@@ -3531,6 +3544,13 @@ $script:UiTimer.Add_Tick({
                 if ( $script:Playing ) { Set-Playing $false }
                 Update-SelectionButtons
             }
+        } elseif ( $script:SendBusy ) {
+            # v5.17.30.1: идёт печать команды - не мешаем (Sync-FromLog в полле
+            # безопасен, но статус он тоже не трогает; главное - не пускаем ЗОНД
+            # печати во время пачки). v5.17.30: старое "-not $script:SyncBusy"
+            # тут создавало дедлок: SyncBusy завис -> полл ветку пропускал ->
+            # сброс 20s внутри Sync-FromLog не вызывался никогда
+            Sync-FromLog
         } elseif ( $script:CurrentMap -eq "" ) {
             # v5.17.1: карта не определена - запрашиваем у игры снапшот: без -log буфер
             # крошечный и MAP-событие уровня не выживает, а дамп несёт DUMPMAP.
