@@ -1243,16 +1243,16 @@ function Send-PathSaveAndSync([string]$prefix) {
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
-        <TextBlock Grid.Row="0" Name="TxFramesLabel" Text="▦ KEYFRAMES (double-click = go to key; Speed editable)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
+        <TextBlock Grid.Row="0" Name="TxFramesLabel" Text="▦ KEYFRAMES (click a cell to edit; double-click = select text; eye = preview)" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="5,0,0,3"/>
         <Grid Grid.Row="1">
       <DataGrid Name="DgKeys" Margin="0,3,0,0" Background="{DynamicResource TableBgBrush}" Foreground="{DynamicResource TextBrush}" BorderBrush="{DynamicResource LineBrush}"
-              FontFamily="Consolas" FontSize="12" AutoGenerateColumns="False" CanUserAddRows="False"
+              FontFamily="Consolas" FontSize="11" AutoGenerateColumns="False" CanUserAddRows="False"
               CanUserDeleteRows="False" CanUserSortColumns="False" SelectionMode="Single"
               HeadersVisibility="Column" GridLinesVisibility="Horizontal" RowBackground="{DynamicResource TableBgBrush}"
               AlternatingRowBackground="{DynamicResource AltRowBrush}" RowHeight="26"
               EnableRowVirtualization="False">
       <DataGrid.Columns>
-        <DataGridTemplateColumn Header="#" Width="40">
+        <DataGridTemplateColumn Header="#" Width="36">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <Grid Background="Transparent">
@@ -1288,15 +1288,35 @@ function Send-PathSaveAndSync([string]$prefix) {
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
-        <DataGridTextColumn Header="Time" Width="60" Binding="{Binding Time}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="X" Width="56" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Y" Width="56" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Z" Width="56" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Yaw" Width="56" Binding="{Binding Yaw}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="Pitch" Width="48" Binding="{Binding Pitch}" IsReadOnly="True"/>
-        <DataGridTextColumn Header="FOV" Width="40" Binding="{Binding FOV}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Time" Width="56" Binding="{Binding Time}"/>
+        <DataGridTextColumn Header="X" Width="56" Binding="{Binding X, StringFormat=F1}"/>
+        <DataGridTextColumn Header="Y" Width="56" Binding="{Binding Y, StringFormat=F1}"/>
+        <DataGridTextColumn Header="Z" Width="56" Binding="{Binding Z, StringFormat=F1}"/>
+        <DataGridTextColumn Header="Yaw" Width="48" Binding="{Binding Yaw}"/>
+        <DataGridTextColumn Header="Pitch" Width="44" Binding="{Binding Pitch}"/>
+        <DataGridTextColumn Header="FOV" Width="36" Binding="{Binding FOV}"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
-        <DataGridTemplateColumn Width="28">
+        <DataGridTemplateColumn Width="44">
+          <DataGridTemplateColumn.CellTemplate>
+            <DataTemplate>
+              <!-- v5.17.18 (#2): галочка/крестик строки - подтвердить/отменить правки
+                   значений строки (появляются при наведении, как корзина и глаз).
+                   Глифы MDL2: E73E CheckMark / E711 Cancel; роутер delHandler по [char] -->
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+                          Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}">
+                <Button Content="&#xE73E;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
+                        Background="Transparent" Foreground="#2F9E44" Padding="2,0" Margin="0,0,2,0"
+                        ToolTip="{DynamicResource TipAcceptRow}"
+                        Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+                <Button Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
+                        Background="Transparent" Foreground="#E5484D" Padding="2,0"
+                        ToolTip="{DynamicResource TipCancelRow}"
+                        Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+              </StackPanel>
+            </DataTemplate>
+          </DataGridTemplateColumn.CellTemplate>
+        </DataGridTemplateColumn>
+        <DataGridTemplateColumn Width="26">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <!-- v5.17.11.7: значок-глаз "посмотреть как выглядит кадр" (goto, вместо
@@ -1310,7 +1330,7 @@ function Send-PathSaveAndSync([string]$prefix) {
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
-        <DataGridTemplateColumn Width="32">
+        <DataGridTemplateColumn Width="30">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
               <Button Content="🗑" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
@@ -1679,6 +1699,16 @@ $delHandler = [System.Windows.RoutedEventHandler]{
             # ВАЖНО: различаем по Content, НЕ по Tag-формату: Tag биндится к Num, а
             # StringFormat на object-свойстве (Tag) WPF МОЛЧА ИГНОРИРУЕТ - тег всегда
             # просто число, "ins:N" не получить. Пилюля "+" = Content "+", корзина = "🗑"
+            if ( [string]$b.Content -eq [string][char]0xE73E ) {
+                # v5.17.18 (#2): галочка = подтвердить правки строки
+                Accept-RowEdits ([int]$tag)
+                return
+            }
+            if ( [string]$b.Content -eq [string][char]0xE711 ) {
+                # v5.17.18 (#2): крестик = откатить правки строки
+                Revert-RowEdits ([int]$tag)
+                return
+            }
             if ( [string]$b.Content -eq "+" ) {
                 # v5.17.11: плюсик сидит РОВНО НА СТЫКЕ над строкой N (верхняя граница
                 # её ячейки) = между строками N-1 и N: вставляем ТЕКУЩИЙ кадр камеры на
@@ -2082,27 +2112,139 @@ $window.Add_Activated({
 })
 $controls['BtnClose'].Add_Click({ $window.Close() })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
+# ---------- v5.17.18 (#2): редактирование значений таблицы ----------
+# одиночный клик по ячейке = редактирование; двойной - выделить текст целиком;
+# правки строки подтверждаются галочкой / отменяются крестиком (колонка перед глазом),
+# клик мимо таблицы сохраняет правки в поля (DataGrid коммитит сам при потере фокуса).
+# Пуш в игру (FOV/Speed) - по ГАЛОЧКЕ; координаты в игре менять нечем, они локальные
+$script:RowSnapshots = @{}
+
+$controls['DgKeys'].Add_BeginningEdit({
+    param($sender, $e)
+    try {
+        $row = $e.Row.Item
+        if ( $row -eq $null ) { return }
+        $n = $row.Num
+        if ( -not $script:RowSnapshots.ContainsKey($n) ) {
+            $script:RowSnapshots[$n] = @{
+                X = $row.X; Y = $row.Y; Z = $row.Z; Yaw = $row.Yaw; Pitch = $row.Pitch
+                FOV = $row.FOV; Speed = $row.Speed; Time = $row.Time
+            }
+        }
+    } catch { }
+})
 $controls['DgKeys'].Add_CellEditEnding({
     param($sender, $e)
-    if ( $e.Column.Header -eq "Speed" ) {
-        $val = ""
-        try { $val = $e.EditingElement.Text } catch { }
+    try {
         $row = $e.Row.Item
-        $idx = -1
-        if ( $row -ne $null ) { $idx = $row.Num }
+        if ( $row -eq $null ) { return }
+        $n = $row.Num
+        # правка времени = обновление key-times (время привязано к координатам)
+        if ( $e.Column.Header -eq "Time" ) {
+            $t = ""
+            try { $t = $e.EditingElement.Text } catch { }
+            if ( $t -match '^\d{2}:\d{2}:\d{2}$' ) {
+                $inv = [System.Globalization.CultureInfo]::InvariantCulture
+                $sk = $row.X.ToString('F1', $inv) + ";" + $row.Y.ToString('F1', $inv) + ";" + $row.Z.ToString('F1', $inv)
+                $script:KeyTimes[$sk] = $t
+            }
+        }
+    } catch { }
+})
+# одиночный клик = начало редактирования; двойной внутри редактирования = SelectAll.
+# Preview+handledEventsToo: DataGrid/TextBox глотают часть кликов
+$dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
+    param($s, $e)
+    try {
+        $dg = $controls['DgKeys']
+        # ячейка под курсором: у DataGrid НЕТ свойства IsEditing - проверять надо
+        # на самой ячейке ($cell.IsEditing), иначе обработчик тихо падал в catch
+        $cell = $null
+        $dep = $e.OriginalSource
+        while ( $dep -ne $null ) {
+            if ( $dep -is [System.Windows.Controls.DataGridCell] ) { $cell = $dep; break }
+            $dep = [Windows.Media.VisualTreeHelper]::GetParent($dep)
+        }
+        # двойной клик в редактируемом TextBox - выделить весь текст
+        if ( $e.ClickCount -ge 2 ) {
+            $tb = $null
+            $dep2 = $e.OriginalSource
+            while ( $dep2 -ne $null ) {
+                if ( $dep2 -is [System.Windows.Controls.TextBox] ) { $tb = $dep2; break }
+                $dep2 = [Windows.Media.VisualTreeHelper]::GetParent($dep2)
+            }
+            if ( $tb -ne $null ) { $tb.SelectAll(); $e.Handled = $true }
+            return
+        }
+        if ( $cell -eq $null -or $cell.IsEditing -or $cell.IsReadOnly ) { return }
+        if ( $script:Playing ) { return }
+        if ( $e.OriginalSource -is [System.Windows.Controls.Button] ) { return }
+        if ( [string]$cell.Column.Header -eq "#" ) { return }
+        # строка-контейнер для BeginEdit(unit, row)
+        $drow = $null
+        $dep3 = $cell
+        while ( $dep3 -ne $null ) {
+            if ( $dep3 -is [System.Windows.Controls.DataGridRow] ) { $drow = $dep3; break }
+            $dep3 = [Windows.Media.VisualTreeHelper]::GetParent($dep3)
+        }
+        # ВАЖНО: [Action]-замыкание выполняется ПОЗЖЕ на диспетчере - локальные
+        # переменные хендлера там НЕ ВИДНЫ (динамический скоуп PS) - только script:!
+        # CurrentCell = кликнутая ячейка; BeginEdit() без аргументов редактирует её
+        $script:EditCell = $cell
         $window.Dispatcher.BeginInvoke([Action]{
-            if ( $val -match '^\d+(\.\d+)?$' -and $idx -ge 0 ) {
-                # v5.17.2: PathSetKeySpeed(i,s) - 2 аргумента, консоль теряет второй;
-                # пошагово: индекс -> значение -> применить
-                $v2 = [int][math]::Round([double]$val)
-                $st = Send-GameCommands @("SpeedIdx $idx","SpeedVal $v2","SpeedApply")
-                Send-PathSaveAndSync $st
-            } else {
-                Set-Status "bad speed value: '$val'"
+            try {
+                $dgv = $controls['DgKeys']
+                $dgv.CurrentCell = New-Object System.Windows.Controls.DataGridCellInfo($script:EditCell)
+                $dgv.BeginEdit()
+            } catch {
+                try { [IO.File]::AppendAllText((Join-Path $PSScriptRoot "markers.log"), ("[" + (Get-Date -Format HH:mm:ss) + "] beginEdit FAIL: " + $_.Exception.Message + "`r`n")) } catch { }
             }
         }) | Out-Null
-    }
-})
+    } catch { }
+}
+$controls['DgKeys'].AddHandler([System.Windows.UIElement]::PreviewMouseLeftButtonDownEvent, $dgKeysEditHandler, $true)
+
+# галочка: подтвердить правки строки - пуш FOV/Speed в игру (если она на уровне) + бэкап
+function Accept-RowEdits([int]$n) {
+    try {
+        $row = $null
+        foreach ( $r in $script:KeyRows ) { if ( $r.Num -eq $n ) { $row = $r; break } }
+        if ( $row -eq $null ) { return }
+        if ( $script:ConfirmBypass -eq $false -and (Get-Process Game -ErrorAction SilentlyContinue) -ne $null -and $script:CurrentMap -ne "" ) {
+            $cmds = @("FovIdx $n", "FovVal $([int]$row.FOV)", "FovApply",
+                      "SpeedIdx $n", "SpeedVal $([int]$row.Speed)", "SpeedApply")
+            Send-GameCommands $cmds | Out-Null
+        }
+        if ( $script:RowSnapshots.ContainsKey($n) ) { $script:RowSnapshots.Remove($n) }
+        Save-KeysBackup
+        Set-Status "row $n edits applied"
+    } catch { }
+}
+# крестик: откатить строку к снимку до правок
+function Revert-RowEdits([int]$n) {
+    try {
+        if ( -not $script:RowSnapshots.ContainsKey($n) ) { return }
+        $snap = $script:RowSnapshots[$n]
+        foreach ( $r in $script:KeyRows ) {
+            if ( $r.Num -eq $n ) {
+                $r.X = $snap.X; $r.Y = $snap.Y; $r.Z = $snap.Z
+                $r.Yaw = $snap.Yaw; $r.Pitch = $snap.Pitch
+                $r.FOV = $snap.FOV; $r.Speed = $snap.Speed; $r.Time = $snap.Time
+                break
+            }
+        }
+        # время вернулось - вернуть и key-times
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $sk = $snap.X.ToString('F1', $inv) + ";" + $snap.Y.ToString('F1', $inv) + ";" + $snap.Z.ToString('F1', $inv)
+        if ( $snap.Time -match '^\d{2}:\d{2}:\d{2}$' ) { $script:KeyTimes[$sk] = $snap.Time }
+        $script:RowSnapshots.Remove($n)
+        $new = New-Object System.Collections.ArrayList
+        foreach ( $r in $script:KeyRows ) { [void]$new.Add($r) }
+        $script:KeyRows = $new
+        Refresh-Table
+        Set-Status "row $n edits reverted"
+    } catch { }
+}
 $controls['DgKeys'].Add_MouseDoubleClick({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -eq $null ) { return }
@@ -2432,7 +2574,7 @@ $script:LocData = @{
         AddKey = "📷  ADD KEYFRAME"
         PlayTime = "▶  PLAY by TIME"; Sec = "sec"
         PlaySpeed = "▶  Play"; Stop = "■  Stop"
-        Keyframes = "▦ KEYFRAMES (double-click = go to key)"
+        Keyframes = "▦ KEYFRAMES (click a cell to edit; eye = preview)"
         NoMap = "(no map)"; Map = "🗺 MAP"
         Export = "↗  Export to file"; Import = "↙  Import from file"
         Insert = "➕  Add keyframe after selected key"
@@ -2458,6 +2600,8 @@ $script:LocData = @{
         TipGithub = "Open the GitHub repository"
         TipNoWindow = "can't see the game window"
         TipInMenu = "the game is in the menu - load a map first"
+        TipAcceptRow = "apply this row's edits (FOV/speed go to the game)"
+        TipCancelRow = "revert this row's edits"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -2466,7 +2610,7 @@ $script:LocData = @{
         AddKey = "📷  ДОБАВИТЬ КАДР"
         PlayTime = "▶  ВОСПРОИЗВЕСТИ по времени"; Sec = "сек"
         PlaySpeed = "▶  Проиграть (по скоростям)"; Stop = "■  Стоп"
-        Keyframes = "▦ КАДРЫ (двойной клик = перейти к кадру)"
+        Keyframes = "▦ КАДРЫ (клик по ячейке = правка; глаз = превью)"
         NoMap = "(нет карты)"; Map = "🗺 КАРТА"
         Export = "↗  Экспорт в файл"; Import = "↙  Импорт из файла"
         Insert = "➕  Добавить кадр после выбранного"
@@ -2492,6 +2636,8 @@ $script:LocData = @{
         TipGithub = "Открыть репозиторий на GitHub"
         TipNoWindow = "не видно активного окна игры"
         TipInMenu = "игра в меню - сначала загрузи карту"
+        TipAcceptRow = "применить правки этой строки (FOV/скорость уйдут в игру)"
+        TipCancelRow = "откатить правки этой строки"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
