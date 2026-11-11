@@ -1364,24 +1364,25 @@ function Send-PathSaveAndSync([string]$prefix) {
                 Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
                 HorizontalContentAlignment="Left" Padding="18,4" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
-        <!-- v5.17.25: одна большая кнопка карты; заголовок "MAP" внутри кнопки,
-             старый отдельный блок (метка + название + превью) удалён как дубликат -->
-        <Button Name="BtnMapSwitch" Height="100" Margin="0,10,0,10" HorizontalContentAlignment="Stretch"
-                Background="{DynamicResource PanelBrush}" ToolTip="{DynamicResource TipMapSwitch}" Cursor="Hand" Padding="12,8">
-          <StackPanel>
-            <TextBlock Name="TbMapLabel" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="11" Margin="0,0,0,6" HorizontalAlignment="Left"/>
-            <Grid>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-              </Grid.ColumnDefinitions>
-              <Image Name="ImgSwitchThumb" Grid.Column="0" Width="72" Height="54" Stretch="Uniform"/>
-              <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-                <TextBlock Name="TbSwitchFriendly" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
-                <TextBlock Name="TbSwitchTech" FontSize="11" Foreground="{DynamicResource MutedBrush}"/>
-              </StackPanel>
-            </Grid>
-          </StackPanel>
+        <!-- v5.17.26: большая кнопка карты; заголовок "MAP" НЕ занимает строку -
+             прижат к правому верхнему углу, на уровне верха картинки и названия -->
+        <Button Name="BtnMapSwitch" Height="86" Margin="0,10,0,10" HorizontalContentAlignment="Stretch"
+                Background="{DynamicResource PanelBrush}" ToolTip="{DynamicResource TipMapSwitch}" Cursor="Hand" Padding="10,6">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Image Name="ImgSwitchThumb" Grid.Column="0" Width="72" Height="54" Stretch="Uniform" VerticalAlignment="Top" Margin="0,2,0,0"/>
+            <!-- название на ПОЛНОЙ ширине, но начинается ниже MAP-метки (метка
+                 прижата к правому верхнему углу) - так ничего не режется -->
+            <StackPanel Grid.Column="1" Margin="10,17,0,0" VerticalAlignment="Top">
+              <TextBlock Name="TbSwitchFriendly" FontSize="13" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
+              <TextBlock Name="TbSwitchTech" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="0,1,0,0"/>
+            </StackPanel>
+            <TextBlock Name="TbMapLabel" Grid.Column="1" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="10"
+                       HorizontalAlignment="Right" VerticalAlignment="Top"/>
+          </Grid>
         </Button>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
@@ -2324,9 +2325,35 @@ $script:MapNames = @{
     Duel05 = "Дуэль 5"; Duel06 = "Дуэль 6"; Duel07 = "Дуэль 7"; Duel08 = "Дуэль 8"
     Duel09 = "Дуэль 9"; Duel10 = "Дуэль 10"; startup = "Стартовая сцена"
 }
+$script:MapNamesEn = @{
+    AOLDemo = "Demo Arena"; Adv10Hermione_Extended = "Rescuing Hermione (Extended)"
+    Adv11aCorridor = "Secret Corridor"; Adv11bSecrets = "Room of Secrets"
+    Adv12Chamber = "Chamber of Secrets"; Adv1Willow = "Battle at the Willow"
+    Adv3DungeonQuest = "Dungeon Escape"; Adv4Greenhouse = "Greenhouse"
+    Adv6Goyle = "Fight with Goyle"; Adv7SlythComRoom = "Slytherin Common Room"
+    Adv8Forest = "Forbidden Forest"; Adv9Aragog = "Aragog"
+    Arena = "Arena"; BeanRewardRoom = "Bean Bonus Room"
+    Ch1Rictusempra = "Rictusempra"; Ch2Skurge = "Skurge"
+    Ch3Diffindo = "Diffindo"; Ch4Spongify = "Spongify"
+    Ch6WizardCard = "Wizard Card"; Ch7Gryffindor = "Gryffindor"
+    Credits = "Credits"; Entry = "Entrance"
+    Entryhall_hub = "Entrance Hall"; FlyingFordCutscene = "Flying Ford (Cutscene)"
+    Grandstaircase_hub = "Grand Staircase"; GreatHall_G = "Great Hall (G)"
+    GreatHall_S = "Great Hall (S)"; Grounds_Night = "Grounds at Night"
+    Grounds_hub = "Hogwarts Grounds"; HPDemo = "Demo Game"
+    Library = "Library"; Library_Night = "Library at Night"
+    PrivetDr = "Privet Drive"; Quidditch = "Quidditch"
+    Quidditch_Intro = "Quidditch (Intro)"; Quidditch_Match = "Quidditch (Match)"
+    Sepia_Hallway = "Hallway (Sepia)"; Transition = "Transition"
+    Duel01 = "Duel 1"; Duel02 = "Duel 2"; Duel03 = "Duel 3"; Duel04 = "Duel 4"
+    Duel05 = "Duel 5"; Duel06 = "Duel 6"; Duel07 = "Duel 7"; Duel08 = "Duel 8"
+    Duel09 = "Duel 9"; Duel10 = "Duel 10"; startup = "Startup Scene"
+}
 function Get-MapFriendlyName([string]$map) {
-    $ru = $script:MapNames[$map]
-    if ( $ru -ne $null -and $ru -ne "" ) { return $ru }
+    # v5.17.26: имя карты по языку панели (EN-словарь для английского режима)
+    if ( $script:Lang -eq "ru" ) { $n = $script:MapNames[$map] }
+    else { $n = $script:MapNamesEn[$map] }
+    if ( $n -ne $null -and $n -ne "" ) { return $n }
     return $map
 }
 function Get-MapCategory([string]$m) {
@@ -2448,11 +2475,32 @@ function Build-MapRows {
         if ( $isFav ) { $star.Content = [string][char]0xE735 } else { $star.Content = [string][char]0xE734 }
         $star.FontFamily = New-Object System.Windows.Media.FontFamily("Segoe MDL2 Assets")
         $star.FontSize = 18
-        $star.Width = 40; $star.Height = 44
-        $star.Background = [System.Windows.Media.Brushes]::Transparent
+        $star.Width = 32; $star.Height = 34
         $star.BorderThickness = [System.Windows.Thickness]::new(0)
         $star.Cursor = [System.Windows.Input.Cursors]::Hand
         if ( $isFav ) { $star.Foreground = [System.Windows.Media.Brushes]::Gold } else { $star.Foreground = $window.Resources['TextBrush'] }
+        # v5.17.26: own template - the default button chrome paints an ugly blue
+        # square on hover; now a subtle theme-colored highlight (rounded, small)
+        $fBd = New-Object System.Windows.FrameworkElementFactory([System.Windows.Controls.Border])
+        $fBd.Name = "bd"
+        $fBd.SetValue([System.Windows.Controls.Border]::BackgroundProperty, [System.Windows.Media.Brushes]::Transparent)
+        $fBd.SetValue([System.Windows.Controls.Border]::CornerRadiusProperty, [System.Windows.CornerRadius]::new(6))
+        $fCp = New-Object System.Windows.FrameworkElementFactory([System.Windows.Controls.ContentPresenter])
+        $fCp.SetValue([System.Windows.Controls.ContentPresenter]::HorizontalAlignmentProperty, [System.Windows.HorizontalAlignment]::Center)
+        $fCp.SetValue([System.Windows.Controls.ContentPresenter]::VerticalAlignmentProperty, [System.Windows.VerticalAlignment]::Center)
+        $fBd.AppendChild($fCp)
+        $tplStar = New-Object System.Windows.Controls.ControlTemplate([System.Windows.Controls.Button])
+        $tplStar.VisualTree = $fBd
+        $trgOver = New-Object System.Windows.Trigger
+        $trgOver.Property = [System.Windows.Controls.Button]::IsMouseOverProperty
+        $trgOver.Value = $true
+        $stOver = New-Object System.Windows.Setter
+        $stOver.Property = [System.Windows.Controls.Border]::BackgroundProperty
+        $stOver.Value = $window.Resources['TableBgBrush']
+        $stOver.TargetName = "bd"
+        $trgOver.Setters.Add($stOver)
+        $tplStar.Triggers.Add($trgOver)
+        $star.Template = $tplStar
         $star.ToolTip = $(if ( $script:Lang -eq "ru" ) { "Р’ РёР·Р±СЂР°РЅРЅРѕРµ" } else { "Favorite" })
         $star.Tag = $m
         $star.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
