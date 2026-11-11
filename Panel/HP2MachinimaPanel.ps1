@@ -2203,6 +2203,10 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
         # (DataGrid сам коммитит только при переходе фокуса)
         if ( $script:EditingNow ) {
             $script:EditingNow = $false
+            # v5.17.20.1: свободное место таблицы = как клик вне таблицы: следующий
+            # клик тоже не начинает правку сразу (иначе FOV -> пустое место -> Speed
+            # другой строки сразу выделял бы значение)
+            $script:JustCommittedOutside = $true
             $window.Dispatcher.BeginInvoke([Action]{
                 try { Commit-RowEdit } catch { }
             }) | Out-Null
