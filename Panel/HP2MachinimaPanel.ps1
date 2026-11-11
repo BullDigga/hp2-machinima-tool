@@ -6,9 +6,32 @@
 
 $ErrorActionPreference = "Stop"
 
+# v5.17.27: кэш C#-хелперов (Panel\cache\*.dll) - без него КАЖДЫЙ старт панели
+# гоняет csc.exe по всем блокам ниже (~30-40 сек "панель долго открывается").
+# Первый старт ещё компилирует и сохраняет DLL, дальше типы грузятся с диска
+function Add-TypeCached {
+    param([string]$TypeName, [string]$Source, [string[]]$Refs = @())
+    if ( $TypeName -as [type] ) { return }
+    $dir = Join-Path $PSScriptRoot "cache"
+    try {
+        if ( -not (Test-Path $dir) ) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $dll = Join-Path $dir (($TypeName -replace '[^A-Za-z0-9_.]', '_') + ".dll")
+        if ( Test-Path $dll ) {
+            try { Add-Type -Path $dll } catch { }
+            if ( $TypeName -as [type] ) { return }
+        }
+        if ( $Refs.Count -gt 0 ) { Add-Type -TypeDefinition $Source -ReferencedAssemblies $Refs -OutputAssembly $dll | Out-Null }
+        else { Add-Type -TypeDefinition $Source -OutputAssembly $dll | Out-Null }
+        if ( -not ($TypeName -as [type]) ) { throw ("type not available after compile: " + $TypeName) }
+    } catch {
+        if ( $Refs.Count -gt 0 ) { Add-Type -TypeDefinition $Source -ReferencedAssemblies $Refs | Out-Null }
+        else { Add-Type -TypeDefinition $Source | Out-Null }
+    }
+}
+
 # v5.17.10.1: свой AppUserModelID ДО любого окна - без него таскбар приколачивает
 # кнопку панели к AUMID powershell.exe и показывает его значок, игнорируя Window.Icon
-Add-Type -TypeDefinition @"
+Add-TypeCached -TypeName 'ShellId' -Source @"
 using System;
 using System.Runtime.InteropServices;
 public static class ShellId {
@@ -20,7 +43,7 @@ public static class ShellId {
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-Add-Type -TypeDefinition @"
+Add-TypeCached -TypeName 'GameCtl' -Source @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -97,7 +120,7 @@ public static class GameCtl {
 }
 "@
 
-Add-Type -TypeDefinition @"
+Add-TypeCached -TypeName 'KeyRow' -Source @"
 public class KeyRow {
     public int Num { get; set; }
     public string Time { get; set; }
@@ -112,7 +135,7 @@ public class KeyRow {
 }
 "@
 
-Add-Type -TypeDefinition @"
+Add-TypeCached -TypeName 'MemScanPanel' -Source @"
 using System;
 using System.Runtime.InteropServices;
 public class MemScanPanel {
@@ -1364,8 +1387,9 @@ function Send-PathSaveAndSync([string]$prefix) {
                 Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
                 HorizontalContentAlignment="Left" Padding="18,4" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
-        <!-- v5.17.26: большая кнопка карты; заголовок "MAP" НЕ занимает строку -
-             прижат к правому верхнему углу, на уровне верха картинки и названия -->
+        <!-- v5.17.27: большая кнопка карты. MAP-метка видна ТОЛЬКО пока карта не
+             загружена (тогда в карточке только метка справа сверху, кнопка серая);
+             при загруженной карте метка не нужна - имя и превью говорят сами за себя -->
         <Button Name="BtnMapSwitch" Height="86" Margin="0,10,0,10" HorizontalContentAlignment="Stretch"
                 Background="{DynamicResource PanelBrush}" ToolTip="{DynamicResource TipMapSwitch}" Cursor="Hand" Padding="10,6">
           <Grid>
@@ -1374,14 +1398,12 @@ function Send-PathSaveAndSync([string]$prefix) {
               <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Image Name="ImgSwitchThumb" Grid.Column="0" Width="72" Height="54" Stretch="Uniform" VerticalAlignment="Top" Margin="0,2,0,0"/>
-            <!-- название на ПОЛНОЙ ширине, но начинается ниже MAP-метки (метка
-                 прижата к правому верхнему углу) - так ничего не режется -->
-            <StackPanel Grid.Column="1" Margin="10,17,0,0" VerticalAlignment="Top">
+            <StackPanel Grid.Column="1" Margin="10,4,0,0" VerticalAlignment="Top">
               <TextBlock Name="TbSwitchFriendly" FontSize="13" FontWeight="Bold" Foreground="{DynamicResource TextBrush}" TextWrapping="Wrap"/>
               <TextBlock Name="TbSwitchTech" FontSize="11" Foreground="{DynamicResource MutedBrush}" Margin="0,1,0,0"/>
             </StackPanel>
             <TextBlock Name="TbMapLabel" Grid.Column="1" Text="🗺 MAP" Foreground="{DynamicResource MutedBrush}" FontSize="10"
-                       HorizontalAlignment="Right" VerticalAlignment="Top"/>
+                       HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-4,0,0"/>
           </Grid>
         </Button>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
@@ -1508,6 +1530,27 @@ function Update-MapPreview {
     # кнопка - старый блок названия+превью удалён как дубликат
     try {
         $map = $script:KeyMap
+        # v5.17.27: два состояния карточки. Игра не на карте (закрыта/меню) ->
+        # в карточке ТОЛЬКО метка MAP справа сверху (юзер), кнопка серая.
+        # Карта загружена -> метка не нужна (имя+превью говорят сами за себя)
+        $gameOn = ( $script:CurrentMap -ne "" )
+        if ( -not $gameOn -or $map -eq "" ) {
+            $controls['TbMapLabel'].Visibility = [System.Windows.Visibility]::Visible
+            $controls['ImgSwitchThumb'].Visibility = [System.Windows.Visibility]::Collapsed
+            $controls['TbSwitchFriendly'].Visibility = [System.Windows.Visibility]::Collapsed
+            $controls['TbSwitchTech'].Visibility = [System.Windows.Visibility]::Collapsed
+            $controls['BtnMapSwitch'].IsEnabled = $false
+            $controls['BtnMapSwitch'].Height = 48
+            $L = $script:LocData[$script:Lang]
+            $controls['BtnMapSwitch'].ToolTip = $L.TipNoGame
+            return
+        }
+        $controls['BtnMapSwitch'].IsEnabled = $true
+        $controls['BtnMapSwitch'].Height = 86
+        $controls['TbMapLabel'].Visibility = [System.Windows.Visibility]::Collapsed
+        $controls['TbSwitchFriendly'].Visibility = [System.Windows.Visibility]::Visible
+        $controls['TbSwitchTech'].Visibility = [System.Windows.Visibility]::Visible
+        $controls['BtnMapSwitch'].ToolTip = $script:LocData[$script:Lang].TipMapSwitch
         $path = "F:\Harry Potter and the Chamber of Secrets\system\Thumbnails\" + $map + ".bmp"
         $hasThumb = ( $map -ne "" -and (Test-Path $path) )
         if ( $hasThumb ) {
@@ -1523,14 +1566,8 @@ function Update-MapPreview {
             $controls['ImgSwitchThumb'].Source = $null
             $controls['ImgSwitchThumb'].Visibility = [System.Windows.Visibility]::Collapsed
         }
-        if ( $map -ne "" ) {
-            $controls['TbSwitchFriendly'].Text = Get-MapFriendlyName $map
-            $controls['TbSwitchTech'].Text = $map + ".unr"
-        } else {
-            $L = $script:LocData[$script:Lang]
-            $controls['TbSwitchFriendly'].Text = $L.MapSwitch
-            $controls['TbSwitchTech'].Text = ""
-        }
+        $controls['TbSwitchFriendly'].Text = Get-MapFriendlyName $map
+        $controls['TbSwitchTech'].Text = $map + ".unr"
     } catch { }
 }
 
@@ -1768,7 +1805,7 @@ function Insert-KeyframeAt([int]$idx) {
 # строки 0 в координаты DataGrid, пересчёт на LayoutUpdated / MouseEnter/Leave /
 # ScrollChanged (скролл не поднимает LayoutUpdated).
 try {
-    Add-Type -TypeDefinition @"
+    Add-TypeCached -TypeName 'HP2.TopHalfPillAdorner' -Source @"
 using System;
 using System.Windows;
 using System.Windows.Documents;
@@ -1791,7 +1828,7 @@ public class TopHalfPillAdorner : Adorner {
     }
 }
 }
-"@ -ReferencedAssemblies @('PresentationCore','PresentationFramework','WindowsBase','System.Xaml')
+"@ -Refs @('PresentationCore','PresentationFramework','WindowsBase','System.Xaml')
 } catch { }
 
 try {
@@ -2485,6 +2522,9 @@ function Build-MapRows {
         $fBd.Name = "bd"
         $fBd.SetValue([System.Windows.Controls.Border]::BackgroundProperty, [System.Windows.Media.Brushes]::Transparent)
         $fBd.SetValue([System.Windows.Controls.Border]::CornerRadiusProperty, [System.Windows.CornerRadius]::new(6))
+        # v5.17.27: плавное увеличение при наведении (принятый паттерн аффорданса)
+        $fBd.SetValue([System.Windows.UIElement]::RenderTransformProperty, [System.Windows.Media.ScaleTransform]::new(1.0, 1.0))
+        $fBd.SetValue([System.Windows.UIElement]::RenderTransformOriginProperty, [System.Windows.Point]::new(0.5, 0.5))
         $fCp = New-Object System.Windows.FrameworkElementFactory([System.Windows.Controls.ContentPresenter])
         $fCp.SetValue([System.Windows.Controls.ContentPresenter]::HorizontalAlignmentProperty, [System.Windows.HorizontalAlignment]::Center)
         $fCp.SetValue([System.Windows.Controls.ContentPresenter]::VerticalAlignmentProperty, [System.Windows.VerticalAlignment]::Center)
@@ -2499,6 +2539,33 @@ function Build-MapRows {
         $stOver.Value = $window.Resources['TableBgBrush']
         $stOver.TargetName = "bd"
         $trgOver.Setters.Add($stOver)
+        # v5.17.27: подсказка "можно нажать" - звезда золотеет на время наведения
+        $stFg = New-Object System.Windows.Setter
+        $stFg.Property = [System.Windows.Controls.Control]::ForegroundProperty
+        $stFg.Value = [System.Windows.Media.Brushes]::Gold
+        $trgOver.Setters.Add($stFg)
+        # плавный scale 1 -> 1.18 и обратно
+        $dur = New-Object System.Windows.Duration([TimeSpan]::FromMilliseconds(120))
+        $sbIn = New-Object System.Windows.Media.Animation.Storyboard
+        foreach ( $dpT in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty) ) {
+            $da = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 1.18, $dur)
+            [System.Windows.Media.Animation.Storyboard]::SetTargetName($da, "bd")
+            [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($da, (New-Object System.Windows.PropertyPath("(0).(1)", @([System.Windows.UIElement]::RenderTransformProperty, $dpT))))
+            $sbIn.Children.Add($da)
+        }
+        $bsbIn = New-Object System.Windows.Media.Animation.BeginStoryboard
+        $bsbIn.Storyboard = $sbIn
+        $trgOver.EnterActions.Add($bsbIn)
+        $sbOut = New-Object System.Windows.Media.Animation.Storyboard
+        foreach ( $dpT in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty) ) {
+            $da2 = New-Object System.Windows.Media.Animation.DoubleAnimation(1.18, 1.0, $dur)
+            [System.Windows.Media.Animation.Storyboard]::SetTargetName($da2, "bd")
+            [System.Windows.Media.Animation.Storyboard]::SetTargetProperty($da2, (New-Object System.Windows.PropertyPath("(0).(1)", @([System.Windows.UIElement]::RenderTransformProperty, $dpT))))
+            $sbOut.Children.Add($da2)
+        }
+        $bsbOut = New-Object System.Windows.Media.Animation.BeginStoryboard
+        $bsbOut.Storyboard = $sbOut
+        $trgOver.ExitActions.Add($bsbOut)
         $tplStar.Triggers.Add($trgOver)
         $star.Template = $tplStar
         $star.ToolTip = $(if ( $script:Lang -eq "ru" ) { "Р’ РёР·Р±СЂР°РЅРЅРѕРµ" } else { "Favorite" })
@@ -2573,6 +2640,19 @@ function Show-MapPicker {
             $win2.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
         }
         $win2.Topmost = $true
+        # v5.17.27: та же иконка (сова), что у панели - дефолтная смотрится чужеродно
+        $iconPath2 = Join-Path $PSScriptRoot "icon.png"
+        if ( Test-Path $iconPath2 ) {
+            try {
+                $ic2 = New-Object Windows.Media.Imaging.BitmapImage
+                $ic2.BeginInit()
+                $ic2.UriSource = (New-Object Uri($iconPath2))
+                $ic2.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                $ic2.EndInit()
+                $ic2.Freeze()
+                $win2.Icon = $ic2
+            } catch { }
+        }
         $win2.Background = $window.Resources['TableBgBrush']
 
         $root2 = New-Object System.Windows.Controls.Grid
@@ -2588,7 +2668,8 @@ function Show-MapPicker {
         $h1 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
         $h2 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}
         $h3 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
-        $hdr.ColumnDefinitions.Add($h1); $hdr.ColumnDefinitions.Add($h2); $hdr.ColumnDefinitions.Add($h3)
+        $h4 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
+        $hdr.ColumnDefinitions.Add($h1); $hdr.ColumnDefinitions.Add($h2); $hdr.ColumnDefinitions.Add($h3); $hdr.ColumnDefinitions.Add($h4)
         $ttl = New-Object System.Windows.Controls.TextBlock
         $ttl.Text = $(if ( $ru ) { "Р’С‹Р±РѕСЂ РєР°СЂС‚С‹" } else { "Map Selector" })
         $ttl.FontSize = 20
@@ -2626,6 +2707,39 @@ function Show-MapPicker {
         $tabFav.Margin = [System.Windows.Thickness]::new(6,0,0,0)
         [void]$tabs.Children.Add($tabFav)
         $hdr.Children.Add($tabs) | Out-Null
+        # v5.17.27: выбор папки с картами - вдруг пользователь хранит их не в Paths игры
+        $btnDir = New-Object System.Windows.Controls.Button
+        $btnDir.Content = [string][char]0xE8B7
+        $btnDir.FontFamily = New-Object System.Windows.Media.FontFamily("Segoe MDL2 Assets")
+        $btnDir.FontSize = 15
+        $btnDir.Width = 34; $btnDir.Height = 34
+        $btnDir.Margin = [System.Windows.Thickness]::new(8,0,0,0)
+        $btnDir.Padding = [System.Windows.Thickness]::new(0)
+        $btnDir.Background = $window.Resources['PanelBrush']
+        $btnDir.Foreground = $window.Resources['TextBrush']
+        $btnDir.Cursor = [System.Windows.Input.Cursors]::Hand
+        $Ldir = $script:LocData[$script:Lang]
+        $btnDir.ToolTip = $Ldir.TipMapsDir
+        [System.Windows.Controls.Grid]::SetColumn($btnDir, 3)
+        $btnDir.Add_Click({
+            param($bd1, $be1)
+            try {
+                Add-Type -AssemblyName System.Windows.Forms
+                $dlg2 = New-Object System.Windows.Forms.FolderBrowserDialog
+                $dlg2.Description = "HP2 - maps folder"
+                $dlg2.SelectedPath = $script:MapsDir
+                if ( $dlg2.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK ) {
+                    $script:MapsDir = $dlg2.SelectedPath
+                    Save-Settings
+                    $script:MPMaps = @(Get-ChildItem -Path $script:MapsDir -Filter "*.unr" -ErrorAction SilentlyContinue |
+                        ForEach-Object { $_.BaseName } | Where-Object { $_ -notin @('vssver') } | Sort-Object)
+                    Build-MapRows -listPanel $script:MPList -allMaps $script:MPMaps -filter $script:MPSearch.Text -favOnly $script:MPFavOnly
+                    Update-MapCounter
+                    Set-Status ("maps folder: " + $script:MapsDir)
+                }
+            } catch { }
+        })
+        $hdr.Children.Add($btnDir) | Out-Null
         $root2.Children.Add($hdr) | Out-Null
 
         # СЃС‡С‘С‚С‡РёРє
@@ -2816,11 +2930,15 @@ $controls['LogPopupBorder'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $scri
 $script:SelDep = @('BtnFovKey','BtnKeySpeed')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed','BtnMapSwitch')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 function Update-SelectionButtons {
+    # v5.17.27: карточка карты живёт в тех же состояниях (chip-only при выключенной
+    # игре) - обновляем её вместе с кнопками, иначе после закрытия игры она
+    # оставалась кликабельной со старым именем до следующего синка
+    try { Update-MapPreview } catch { }
     # v5.17.14 (#8): ветка ИГРАЕТ проверяется ПЕРВОЙ и безусловно - иначе синк или
     # 5.4с-полл со сбойным сканом (CurrentMap слетел в "") гасили Stop посреди
     # проигрывания, а через несколько секунд полл его возвращал
@@ -3037,6 +3155,7 @@ $script:LocData = @{
         OneKey = "only 1 key - jumped to it"
         TipWrongMap = "Keyframes belong to a different map - load it or clear the table"
         TipNoGame = "The game is not running on a level - launch the game and load a map"
+        TipMapsDir = "Choose the folder with .unr maps"
         TipInsertRow = "insert CURRENT camera keyframe here (between this and the previous row)"
         TipGotoRow = "preview this keyframe (jump the camera to it)"
         TipDelRow = "delete this keyframe"
@@ -3074,6 +3193,7 @@ $script:LocData = @{
         OneKey = "всего один кадр - перешли к нему"
         TipWrongMap = "Кадры с другой карты - загрузите её или очистите таблицу"
         TipNoGame = "Игра не запущена на уровне - запусти игру и выбери карту"
+        TipMapsDir = "Выбрать папку с картами .unr"
         TipInsertRow = "вставить ТЕКУЩИЙ кадр камеры сюда (между этой и предыдущей строкой)"
         TipGotoRow = "посмотреть, как выглядит этот кадр (камера перейдёт к нему)"
         TipDelRow = "удалить этот кадр"
@@ -3156,7 +3276,7 @@ $script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
 $script:FavMaps = New-Object System.Collections.Generic.List[string]
 function Save-Settings {
     try {
-        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps) } |
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir } |
             ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
 }
@@ -3168,6 +3288,10 @@ try {
     if ( $s.lang -eq "ru" ) { $script:StartLang = "ru" }
     if ( $s.favmaps -ne $null ) {
         foreach ( $fm in @($s.favmaps) ) { if ( $fm -ne $null -and $fm -ne "" ) { [void]$script:FavMaps.Add([string]$fm) } }
+    }
+    # v5.17.27: пользовательская папка карт (вдруг хранит не в Paths игры)
+    if ( $s.mapsdir -ne $null -and $s.mapsdir -ne "" -and (Test-Path ([string]$s.mapsdir)) ) {
+        $script:MapsDir = [string]$s.mapsdir
     }
 } catch { }
 Set-Theme ($script:StartTheme -eq "dark")
