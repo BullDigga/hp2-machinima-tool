@@ -367,6 +367,12 @@ function Send-GameCommands([string[]]$cmds) {
     # прокачивает отрисовку - спиннер крутится СРАЗУ и НЕ ЗАМИРАЕТ на весь ввод
     if ( $script:SendBusy ) { return "busy - command still sending" }
     if ( -not $script:ConfirmBypass -and -not (Confirm-GameActive) ) { return "aborted: game not on a level" }
+    # v5.17.27: фоновые зонды (ConfirmBypass: старт панели, 5.4с-полл в меню) обязаны
+    # сфокусировать игру ради консоли, но не должны УВОДИТЬ фокус - жалоба юзера
+    # "перед панелью открывается Гарри Поттер". Запоминаем активное окно и возвращаем
+    # его после печати (жёсткий SetForegroundWindow после Alt-тапа, как в Focus-GameWindow)
+    $fgSaved = [IntPtr]::Zero
+    if ( $script:ConfirmBypass ) { $fgSaved = [GameCtl]::GetForegroundWindow() }
     $script:SendBusy = $true
     try {
         Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
@@ -425,6 +431,12 @@ function Send-GameCommands([string[]]$cmds) {
         return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
     } finally {
         $script:SendBusy = $false
+        try {
+            if ( $fgSaved -ne [IntPtr]::Zero -and [GameCtl]::GetForegroundWindow() -ne $fgSaved ) {
+                [GameCtl]::Tap(0x12) | Out-Null
+                [GameCtl]::SetForegroundWindow($fgSaved) | Out-Null
+            }
+        } catch { }
     }
 }
 
