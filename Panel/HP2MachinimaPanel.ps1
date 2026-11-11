@@ -543,6 +543,9 @@ $script:KeyTimes = @{}      # "<gamepid>:<seq>" кадра -> "HH:mm:ss" вре�
 $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
 $script:CurrentMap = ""   # карта, где игра СЕЙЧАС (из MAP-событий)
+# v5.17.30: подкнопка "вернуться к кадрам" - флаги перехода и прибытия
+$script:KeyMapGoClicked = $false
+$script:KeyMapGoArrived = $false
 $script:KeyMap = ""       # v5.14: карта, которой принадлежат кадры в таблице
 $script:LastGen = -1      # v5.16: поколение лога (меняется на каждой загрузке уровня)
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
@@ -809,11 +812,19 @@ function Complete-SyncFromLogInner {
             # отбрасывались как "нет новых событий" - DEL/CLEAR не доходили до таблицы)
             $src = "memory"
             $newMax = 0
+            $newGen = 0
             $hadEv = $false
             foreach ( $mm in [regex]::Matches($txt, 'PATHEV:(\d+):(\d+)\|') ) {
                 $hadEv = $true
+                $g = [long]$mm.Groups[1].Value
                 $v = [long]$mm.Groups[2].Value
-                if ( $v -gt $newMax ) { $newMax = $v }
+                # v5.17.30: максимум по паре (gen,seq), НЕ по голому seq. Смена уровня
+                # сбрасывает seq в 1 - новые события (gen N+1, seq 1-2) были "меньше"
+                # старого LastSeq (сотни seq прошлого уровня), фильтр отбрасывал весь
+                # дамп, и панель не видела загрузку новой карты до полного рескана
+                if ( ($g -gt $newGen) -or ($g -eq $newGen -and $v -gt $newMax) ) {
+                    $newGen = $g; $newMax = $v
+                }
             }
             if ( -not $hadEv ) {
                 # fallback: буфер без поколений (старый формат игры)
@@ -830,6 +841,7 @@ function Complete-SyncFromLogInner {
                 Sync-FromLog -Force
                 return
             }
+            if ( $newGen -gt $script:LastGen ) { $script:ScanCache.LastSeq = 0 }
             if ( $newMax -le $script:ScanCache.LastSeq ) { $txt = ""; $src = "" }
         }
     }
@@ -864,7 +876,12 @@ function Complete-SyncFromLogInner {
         $genSwitch = ($maxGen -ne $script:LastGen)
         if ( $genSwitch ) {
             $script:LastGen = $maxGen
-            $script:KeyMap = ""
+            # v5.17.30: KeyMap при смене поколения БОЛЬШЕ не стирается. Смена уровня
+            # ВО ВРЕМЯ ИГРЫ (die-телепорт, переход-триггер) - кадры по-прежнему
+            # принадлежат старой карте: лок кнопок и подкнопка "вернуться к кадрам"
+            # должны знать целевую карту. ADD при новом кадре перетегирует KeyMap
+            # на текущую карту как раньше (юзер осознанно начал новый путь)
+            # $script:KeyMap = ""
             $gp2 = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
             if ( $gp2 -ne $null ) {
                 $pfx2 = [string]$gp2.Id + ":"
@@ -896,7 +913,7 @@ function Complete-SyncFromLogInner {
         $dumpRows = New-Object System.Collections.ArrayList
         foreach ( $e in $ev ) {
             switch ( $e.T ) {
-                'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = "" }
+                'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = ""; $script:KeyMapGoClicked = $false }
                 'DEL'   {
                     $i = [int]$e.D
                     if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) }
@@ -1062,13 +1079,22 @@ function Complete-SyncFromLogInner {
         # карты и пользователь не давал явную очистку - игра перезапустилась после
         # краша/закрытия: кадры СОХРАНЯЕМ (требование #backup: в панели всё живёт,
         # пока пользователь сам не удалит). Явная очистка - PathClear из панели с
-        # флагом UserClearPending (гасится после этого синка). ДРУГАЯ карта - старые
-        # кадры не отображаем (goto/вставка считаются по пути игры), бэкап-файл
-        # с ними сохранён, восстановление через Import from file
+        # флагом UserClearPending (гасится после этого синка). ДРУГАЯ карта (v5.17.30) -
+        # кадры тоже сохраняем и показываем: лок кнопок защищает их от порчи,
+        # подкнопка на карточке предлагает вернуться на карту кадров
         if ( $rows.Count -eq 0 -and $script:KeyRows.Count -gt 0 -and -not $script:UserClearPending ) {
             if ( $prevKeyMap -ne "" -and $prevKeyMap -eq $script:CurrentMap ) {
                 $rows = $script:KeyRows
                 $script:KeyMap = $prevKeyMap
+                # v5.17.30: вернулись на карту кадров после подкнопки - путь игры пуст
+                # (дамп 0 кадров), предложим записать кадры в игру (промпт в конце синка)
+                if ( $script:KeyMapGoClicked ) { $script:KeyMapGoClicked = $false; $script:KeyMapGoArrived = $true }
+            } elseif ( $prevKeyMap -ne "" -and $script:CurrentMap -ne "" ) {
+                # v5.17.30: ДРУГАЯ карта (die-телепорт, переход уровня) - кадры остаются
+                # в памяти панели и ПОКАЗЫВАЮТСЯ (лок кнопок не даёт их портить:
+                # goto/вставка считаются по пути игры, а он тут пуст). Раньше кадры
+                # стирались в 0 и восстанавливались только через Import из файла
+                $rows = $script:KeyRows
             }
         }
         $wasClear = $script:UserClearPending
@@ -1094,6 +1120,16 @@ function Complete-SyncFromLogInner {
             $script:CurrentMap = $lastMap
         }
         Update-SelectionButtons
+        # v5.17.30: после перехода по подкнопке кадры восстановлены из памяти, но путь
+        # игры пуст - промпт "записать кадры в игру?" через короткий таймер (UI уже
+        # отрисован, Send-GameCommands не должен идти внутри синка)
+        if ( $script:KeyMapGoArrived ) {
+            $script:KeyMapGoArrived = $false
+            $tGo = New-Object System.Windows.Threading.DispatcherTimer
+            $tGo.Interval = [TimeSpan]::FromMilliseconds(600)
+            $tGo.Add_Tick({ param($s, $e) $s.Stop(); Prompt-PushKeysAfterArrival })
+            $tGo.Start()
+        }
         if ( $rows.Count -eq 0 -and $wasClear ) {
             # явная очистка в игре - бэкап тоже пустеет
             Save-KeysBackup -ForceEmpty
@@ -1555,6 +1591,13 @@ function Send-PathSaveAndSync([string]$prefix) {
                        HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-4,0,0"/>
           </Grid>
         </Button>
+        <!-- v5.17.30: подкнопка "вернуться к кадрам" - видна ТОЛЬКО когда кадры в панели
+             с другой карты, чем та, где сейчас игра (die-телепорт, переход уровня).
+             Клик = Switch-ToMap(KeyMap): open <карта> в консоли игры. Пока карты
+             совпадают (или кадров нет) кнопка скрыта, карточка обычного размера -->
+        <Button Name="BtnKeyMapGo" Height="30" Margin="0,-4,0,10" Visibility="Collapsed"
+                Background="#FAB387" Foreground="#1E1E2E" FontSize="12" FontWeight="Bold"
+                HorizontalContentAlignment="Left" Padding="14,3" Cursor="Hand" BorderThickness="0"/>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
                 HorizontalContentAlignment="Left" Padding="14,4" ToolTipService.ShowOnDisabled="True"/>
@@ -1631,7 +1674,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1726,7 +1769,73 @@ function Update-MapPreview {
     } catch { }
 }
 
+# ---------- v5.17.30: die-телепорт / переход уровня с кадрами другой карты ----------
+function Update-KeyMapGoButton {
+    # подкнопка "вернуться к кадрам" под карточкой карты. Видна ТОЛЬКО когда кадры
+    # в панели с другой карты, чем та, где сейчас игра (die-телепорт, переход-триггер).
+    # Карточка в этот момент сжимается (86->58, превью прячется), чтобы блок
+    # "карта + подкнопка" не разъезжался по вертикали
+    try {
+        $wrong = ($script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)
+        if ( $wrong ) {
+            $L = $script:LocData[$script:Lang]
+            $fn = Get-MapFriendlyName $script:KeyMap
+            $controls['BtnKeyMapGo'].Content = ($L.KeyMapGo -f $fn)
+            $controls['BtnKeyMapGo'].ToolTip = ($L.TipKeyMapGo -f $script:KeyMap)
+            $controls['BtnKeyMapGo'].Visibility = "Visible"
+            $controls['BtnMapSwitch'].Height = 58
+            $controls['ImgSwitchThumb'].Visibility = "Collapsed"
+        } else {
+            $controls['BtnKeyMapGo'].Visibility = "Collapsed"
+        }
+    } catch { }
+}
+function Push-KeysToGame {
+    # запись кадров из памяти панели в путь игры: PathClear + AddX/AddY/.../AddCommit
+    # на каждый кадр (та же пошаговая схема, что у Import from file - консоль M212
+    # берёт ТОЛЬКО ПЕРВЫЙ аргумент typed-exec). Времена постановки уже лежат в
+    # KeyTimes по координатам - StampNextSync не нужен
+    if ( $script:KeyRows.Count -eq 0 ) { return }
+    $cmds = @("PathClear")
+    foreach ( $r in $script:KeyRows ) {
+        $xk = [int][math]::Round(($r.X + 1000000.0) * 10.0)
+        $yk = [int][math]::Round(($r.Y + 1000000.0) * 10.0)
+        $zk = [int][math]::Round(($r.Z + 1000000.0) * 10.0)
+        $yw = [long]$r.Yaw; $yw = (($yw % 65536) + 65536) % 65536
+        $pt = [long]$r.Pitch; $pt = (($pt % 65536) + 65536) % 65536
+        $fv = [int][math]::Round($r.FOV)
+        $sp = [int][math]::Round($r.Speed)
+        $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddCommit")
+    }
+    $st = Send-GameCommands $cmds
+    Sync-AfterCommand ("pushed $($script:KeyRows.Count) keys to the game | $st")
+}
+function Prompt-PushKeysAfterArrival {
+    # после перехода по подкнопке кадры восстановлены в таблице из памяти, но путь
+    # игры пуст (дамп 0 кадров). Предлагаем записать их в игру сразу
+    try {
+        if ( $script:KeyRows.Count -eq 0 ) { return }
+        if ( $script:CurrentMap -eq "" -or $script:CurrentMap -ne $script:KeyMap ) { return }
+        $L = $script:LocData[$script:Lang]
+        $r = [System.Windows.MessageBox]::Show(($L.PushKeysQ -f $script:KeyRows.Count), $L.PushKeysTitle, 'YesNo', 'Question')
+        if ( $r -eq 'Yes' ) { Push-KeysToGame }
+        else { Set-Status $L.PushKeysNo }
+    } catch { }
+}
+$controls['BtnKeyMapGo'].Add_Click({
+    if ( $script:KeyMap -ne "" ) {
+        $script:KeyMapGoClicked = $true
+        Switch-ToMap $script:KeyMap
+    }
+})
+function Test-WrongMap {
+    # v5.17.30: единый гвард "кадры с другой карты" - блокирует и ДОБАВЛЕНИЕ кадров
+    # (F8 горячей клавишей обходится серость кнопки: ADD перетегировал бы KeyMap на
+    # текущую карту, записи прежней карты потерялись бы)
+    return ( $script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap )
+}
 function Do-PathAdd {
+    if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
     # скорость кадра = поле fly speed: применяем её перед добавлением
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
@@ -1787,6 +1896,8 @@ function Get-PathTotalDur {
     return $tot
 }
 function Do-PathPlay {
+    # v5.17.30: кадры с другой карты - проигрывать нельзя (и F9 тоже)
+    if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
     # один кадр = просто перейти к нему (игра требует минимум 2 для проигрывания)
     if ( $script:KeyRows.Count -eq 1 ) {
         $st = Send-GameCommand "PathGoto 0"
@@ -1802,6 +1913,8 @@ function Do-PathPlay {
     Set-Status $st
 }
 function Do-PathPlayTime {
+    # v5.17.30: кадры с другой карты - проигрывать нельзя
+    if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
     # один кадр = просто перейти к нему
     if ( $script:KeyRows.Count -eq 1 ) {
         $st = Send-GameCommand "PathGoto 0"
@@ -2580,6 +2693,14 @@ function Switch-ToMap([string]$map) {
         Set-Status ("switching to " + $map + "...")
         $st = Send-GameCommand ("open " + $map)
         Set-Status ($st + " | " + $(if ( $script:Lang -eq "ru" ) { "РєР°СЂС‚Р° " } else { "map " }) + $map)
+        # v5.17.30: детерминированные полные ресканы после open - загрузка карты
+        # перевыделяет буфер лога, быстрый скан слепнет до очередного Force
+        foreach ( $sec in @(12, 26) ) {
+            $tSw = New-Object System.Windows.Threading.DispatcherTimer
+            $tSw.Interval = [TimeSpan]::FromSeconds($sec)
+            $tSw.Add_Tick({ param($s, $e) $s.Stop(); Sync-FromLog -Force })
+            $tSw.Start()
+        }
     } catch { }
 }
 # ---------- v5.17.28: запуск игры на выбранной карте (игра не запущена) ----------
@@ -3215,6 +3336,8 @@ function Update-SelectionButtons {
     # игре) - обновляем её вместе с кнопками, иначе после закрытия игры она
     # оставалась кликабельной со старым именем до следующего синка
     try { Update-MapPreview } catch { }
+    # v5.17.30: подкнопка "вернуться к кадрам" (видна только при чужой карте)
+    Update-KeyMapGoButton
     # v5.17.14 (#8): ветка ИГРАЕТ проверяется ПЕРВОЙ и безусловно - иначе синк или
     # 5.4с-полл со сбойным сканом (CurrentMap слетел в "") гасили Stop посреди
     # проигрывания, а через несколько секунд полл его возвращал
@@ -3256,9 +3379,13 @@ function Update-SelectionButtons {
     # v5.14: кадры с другой карты - нельзя добавлять/воспроизводить/переходить
     $wrong = ($script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)
     if ( $wrong ) {
-        foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed')) ) {
+        # v5.17.30: расширенный лок - FOV/Speed->ALL тоже пишут в путь игры, а он на
+        # другой карте пуст; таблица замораживается целиком (строки чужой карты видны,
+        # но edit/goto/trash на них идти не должны - goto/вставка считаются по пути игры)
+        foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed','BtnFovAll','BtnSpeedAll')) ) {
             try { $controls[$b].IsEnabled = $false } catch { }
         }
+        try { $controls['DgKeys'].IsEnabled = $false } catch { }
         # v5.17.7: цикл PlayLock выше перевключил Set FOV / Set fly speed - вернуть
         # серость по правилу "в поле уже применённое значение"
         Set-ParamBoxState "fov"
@@ -3274,6 +3401,14 @@ function Update-SelectionButtons {
         return
     }
     foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
+    # v5.17.30: после wrong-map лока и PlayLock таблица включается обратно явно
+    try { $controls['DgKeys'].IsEnabled = $true } catch { }
+    # v5.17.30: КРИТИЧНЫЙ фикс - NoGameDep кнопки никогда не включались обратно.
+    # Ветка "игра не на карте" (старт панели до синка: CurrentMap ещё пуст, игра
+    # закрыта/в меню) их выключала, нормальная ветка - нет. Кнопки выглядели
+    # цветными (жёсткий фон у ADD), но НЕ КЛИКАЛИСЬ ("карта видна, кнопки мертвы"
+    # - репродукция: перезапуск панели при уже загруженной карте)
+    foreach ( $b in $script:NoGameDep ) { try { $controls[$b].IsEnabled = $true } catch { } }
     foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
     $controls['BtnPathClear'].IsEnabled = ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = $false
@@ -3371,6 +3506,7 @@ function Stop-Spin {
 $script:SpinManual = $false
 $script:SpinAngle = 0
 $script:GamePoll = 0
+$script:PollInGame = 0
 $script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
 $script:UiTimer.Add_Tick({
@@ -3397,12 +3533,22 @@ $script:UiTimer.Add_Tick({
             }
         } elseif ( $script:CurrentMap -eq "" ) {
             # v5.17.1: карта не определена - запрашиваем у игры снапшот: без -log буфер
-            # крошечный и MAP-событие уровня в нём не выживает, а дамп несёт DUMPMAP.
+            # крошечный и MAP-событие уровня не выживает, а дамп несёт DUMPMAP.
             # v5.17.15: ПОЛЛ идёт мимо Confirm-GameActive - фоновые зонды не должны
             # воровать фокус и выходить из меню каждые 5.4с
             $script:ConfirmBypass = $true
             try { Send-GameCommand "PathDumpKeys" | Out-Null } finally { $script:ConfirmBypass = $false }
             Sync-FromLog -Force
+        } else {
+            # v5.17.30: игра на карте - полл обязан синкаться БЕЗ зонда. Раньше синков
+            # в этом состоянии не было вообще: смена карты в игре (die-телепорт,
+            # переход, open из панели) не обнаруживалась, пока юзер не нажмёт кнопку
+            # или панель не перезапустится. Быстрый скан каждый полл ловит смену
+            # поколения за ~5.4с (фильтр newMax теперь учитывает gen); раз в 10 поллов
+            # (~54с) полный рескан - буфер лога может перевылелиться, кэш областей
+            # устаревает и быстрый скан молча видит только старые копии
+            $script:PollInGame = ($script:PollInGame + 1) % 10
+            if ( $script:PollInGame -eq 0 ) { Sync-FromLog -Force } else { Sync-FromLog }
         }
     }
 })
@@ -3446,6 +3592,11 @@ $script:LocData = @{
         MapSwitch = "⇄  Switch map"
         TipMapSwitch = "Open the map picker"
         MapWarnQ = "Switch map? The in-game path will be cleared (a backup copy stays in the panel - Import restores it)."
+        KeyMapGo = "→  {0}"
+        TipKeyMapGo = "The keyframes belong to '{0}', but another map is loaded - click to load '{0}' (the in-game path restarts; the keyframes stay in the panel)"
+        PushKeysQ = "Keyframes restored in the table, but the in-game path is empty after the map load.`nWrite {0} keyframes into the game now?"
+        PushKeysTitle = "Restore path"
+        PushKeysNo = "keyframes are in the table - use Import from file to write them into the game"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -3485,6 +3636,11 @@ $script:LocData = @{
         MapSwitch = "⇄  Сменить карту"
         TipMapSwitch = "Открыть выбор карты"
         MapWarnQ = "Сменить карту? Путь в игре сбросится (копия кадров осталась в панели - восстановится через Импорт)."
+        KeyMapGo = "→  {0}"
+        TipKeyMapGo = "Кадры относятся к карте '{0}', но сейчас загружена другая - клик загрузит '{0}' (путь в игре перезапишется; кадры останутся в панели)"
+        PushKeysQ = "Кадры восстановлены в таблице, но путь в игре пуст после загрузки карты.`nЗаписать {0} кадров в игру сейчас?"
+        PushKeysTitle = "Восстановить путь"
+        PushKeysNo = "кадры в таблице - для записи в игру используйте Импорт из файла"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
@@ -3522,6 +3678,8 @@ function Set-Lang([string]$lang) {
     $controls['TxSec'].Text = $L.Sec
     $controls['TxFlySpeed'].Text = $L.FlySpeed
     Update-MapPreview
+    # v5.17.30: подкнопка "вернуться к кадрам" - перерисовать контент под язык
+    Update-KeyMapGoButton
     # подсказки на серых кнопках
     foreach ( $b in @('BtnFovKey','BtnKeySpeed') ) { $controls[$b].ToolTip = $L.TipSelect }
     foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
