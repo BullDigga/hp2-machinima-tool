@@ -454,6 +454,7 @@ function Send-GameCommands([string[]]$cmds) {
     $fgSaved = [IntPtr]::Zero
     if ( $script:ConfirmBypass ) { $fgSaved = [GameCtl]::GetForegroundWindow() }
     $script:SendBusy = $true
+    $script:SendStartedAt = Get-Date
     try {
         Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
         # v5.17.7: оранжевый debug-статус СРАЗУ при клике - что и сколько печатаем
@@ -517,7 +518,12 @@ function Send-GameCommands([string[]]$cmds) {
             if ( -not $script:SyncBusy ) { Stop-Spin }
         })
         $script:SpinStopTimer.Start()
-        return ("$($cmds.Count) cmds OK  " + (Get-Date -Format HH:mm:ss))
+        # v5.17.30.2: замер длительности отправки. Живой факт: отправка open из
+        # пикера ВИСЛА ~2 мин при норме ~5с (SendBusy всё это время отбивал новые
+        # команды "busy", юзер видел "ничего не происходит"). Где блокируется -
+        # покажет длительность в статусе
+        $dur = [int]((Get-Date) - $script:SendStartedAt).TotalMilliseconds
+        return ("$($cmds.Count) cmds OK ${dur}ms  " + (Get-Date -Format HH:mm:ss))
     } finally {
         $script:SendBusy = $false
         try {
@@ -2706,6 +2712,23 @@ function Switch-ToMap([string]$map) {
         Set-Status ("switching to " + $map + "...")
         $st = Send-GameCommand ("open " + $map)
         Set-Status ($st + " | " + $(if ( $script:Lang -eq "ru" ) { "РєР°СЂС‚Р° " } else { "map " }) + $map)
+        # v5.17.30.2: ЖИВОЙ ФАКТ - печать open дошла до консоли игры (PING-маркер
+        # в буфере), но карта НЕ сменилась (exec видимо потерял текст/аргумент).
+        # Через 20с проверяем CurrentMap: не сменилась - автоматический ПОВТОР open
+        $mapFrom = $script:CurrentMap
+        $tSw = New-Object System.Windows.Threading.DispatcherTimer
+        $tSw.Interval = [TimeSpan]::FromSeconds(20)
+        $tSw.Add_Tick({
+            param($s, $e)
+            $s.Stop()
+            try {
+                if ( $script:CurrentMap -ne $mapFrom -and $script:CurrentMap -ne "" ) { return }   # грузится/загрузилась
+                Set-Status ("map did not load - retrying open " + $map + "...") "warn"
+                $st2 = Send-GameCommand ("open " + $map)
+                Set-Status ($st2 + " | retry map " + $map)
+            } catch { }
+        })
+        $tSw.Start()
         # v5.17.30: детерминированные полные ресканы после open - загрузка карты
         # перевыделяет буфер лога, быстрый скан слепнет до очередного Force
         foreach ( $sec in @(12, 26) ) {
@@ -3545,11 +3568,16 @@ $script:UiTimer.Add_Tick({
                 Update-SelectionButtons
             }
         } elseif ( $script:SendBusy ) {
-            # v5.17.30.1: идёт печать команды - не мешаем (Sync-FromLog в полле
-            # безопасен, но статус он тоже не трогает; главное - не пускаем ЗОНД
-            # печати во время пачки). v5.17.30: старое "-not $script:SyncBusy"
-            # тут создавало дедлок: SyncBusy завис -> полл ветку пропускал ->
-            # сброс 20s внутри Sync-FromLog не вызывался никогда
+            # v5.17.30.2: ЖИВОЙ ФАКТ - отправка из пикера висела ~2 мин при норме ~5с
+            # (SendBusy всё это время молча отбивал команды, юзер: "ничего не
+            # происходит"). Причина блокировки неясна - надёжный авто-борт: флаг
+            # старше 25с = отправка умерла, сбрасываем (нормальная печать <10с).
+            # v5.17.30.1: Sync-FromLog в этой ветке безопасен (сброс 20s-зависшего
+            # скана теперь достижим)
+            if ( $script:SendStartedAt -ne $null -and ((Get-Date) - $script:SendStartedAt).TotalSeconds -gt 25 ) {
+                $script:SendBusy = $false
+                Set-Status "send timed out (>25s) - flag reset, try again" "warn"
+            }
             Sync-FromLog
         } elseif ( $script:CurrentMap -eq "" ) {
             # v5.17.1: карта не определена - запрашиваем у игры снапшот: без -log буфер
