@@ -1296,26 +1296,6 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTextColumn Header="Pitch" Width="44" Binding="{Binding Pitch}" IsReadOnly="True"/>
         <DataGridTextColumn Header="FOV" Width="36" Binding="{Binding FOV}"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
-        <DataGridTemplateColumn Width="44">
-          <DataGridTemplateColumn.CellTemplate>
-            <DataTemplate>
-              <!-- v5.17.19 (#2): галочка/крестик ТОЛЬКО пока строка редактируется:
-                   строка помечается EditingRowTag (см. BeginEdit/CellEditEnding-хуки);
-                   вне правки колонка пустая -->
-              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
-                          x:Name="EditActions"
-                          Tag="{Binding Num}"
-                          Visibility="Collapsed">
-                <Button Content="&#xE73E;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
-                        Background="Transparent" Foreground="#2F9E44" Padding="2,0" Margin="0,0,2,0"
-                        ToolTip="{DynamicResource TipAcceptRow}"/>
-                <Button Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
-                        Background="Transparent" Foreground="#E5484D" Padding="2,0"
-                        ToolTip="{DynamicResource TipCancelRow}"/>
-              </StackPanel>
-            </DataTemplate>
-          </DataGridTemplateColumn.CellTemplate>
-        </DataGridTemplateColumn>
         <DataGridTemplateColumn Width="26">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
@@ -1699,16 +1679,6 @@ $delHandler = [System.Windows.RoutedEventHandler]{
             # ВАЖНО: различаем по Content, НЕ по Tag-формату: Tag биндится к Num, а
             # StringFormat на object-свойстве (Tag) WPF МОЛЧА ИГНОРИРУЕТ - тег всегда
             # просто число, "ins:N" не получить. Пилюля "+" = Content "+", корзина = "🗑"
-            if ( [string]$b.Content -eq [string][char]0xE73E ) {
-                # v5.17.18 (#2): галочка = подтвердить правки строки
-                Accept-RowEdits ([int]$tag)
-                return
-            }
-            if ( [string]$b.Content -eq [string][char]0xE711 ) {
-                # v5.17.18 (#2): крестик = откатить правки строки
-                Revert-RowEdits ([int]$tag)
-                return
-            }
             if ( [string]$b.Content -eq "+" ) {
                 # v5.17.11: плюсик сидит РОВНО НА СТЫКЕ над строкой N (верхняя граница
                 # её ячейки) = между строками N-1 и N: вставляем ТЕКУЩИЙ кадр камеры на
@@ -2113,43 +2083,43 @@ $window.Add_Activated({
 $controls['BtnClose'].Add_Click({ $window.Close() })
 # Speed редактируется прямо в таблице: после правки ячейки -> в игру + ini
 # ---------- v5.17.18 (#2): редактирование значений таблицы ----------
-# одиночный клик по ячейке = редактирование; двойной - выделить текст целиком;
-# правки строки подтверждаются галочкой / отменяются крестиком (колонка перед глазом),
-# клик мимо таблицы сохраняет правки в поля (DataGrid коммитит сам при потере фокуса).
-# Пуш в игру (FOV/Speed) - по ГАЛОЧКЕ; координаты в игре менять нечем, они локальные
-$script:RowSnapshots = @{}
+# одиночный клик по ячейке = редактирование; двойной - выделить текст целиком.
+# Сохранение: Enter или клик в любое место панели (DataGrid коммитит при потере
+# фокуса/Enter). Правка FOV/Speed уходит в игру СРАЗУ при завершении ячейки;
+# правка времени = обновление key-times (время привязано к координатам).
+# Координаты в игре менять нечем, они локальные
 $script:EditingNow = $false
 
-$controls['DgKeys'].Add_BeginningEdit({
-    param($sender, $e)
-    try {
-        $row = $e.Row.Item
-        if ( $row -eq $null ) { return }
-        $n = $row.Num
-        if ( -not $script:RowSnapshots.ContainsKey($n) ) {
-            $script:RowSnapshots[$n] = @{
-                X = $row.X; Y = $row.Y; Z = $row.Z; Yaw = $row.Yaw; Pitch = $row.Pitch
-                FOV = $row.FOV; Speed = $row.Speed; Time = $row.Time
-            }
-        }
-    } catch { }
-})
 $controls['DgKeys'].Add_CellEditEnding({
     param($sender, $e)
     try {
         $row = $e.Row.Item
         if ( $row -eq $null ) { return }
         $n = $row.Num
-        # правка времени = обновление key-times (время привязано к координатам)
-        if ( $e.Column.Header -eq "Time" ) {
-            $t = ""
-            try { $t = $e.EditingElement.Text } catch { }
-            if ( $t -match '^\d{2}:\d{2}:\d{2}$' ) {
-                $inv = [System.Globalization.CultureInfo]::InvariantCulture
-                $sk = $row.X.ToString('F1', $inv) + ";" + $row.Y.ToString('F1', $inv) + ";" + $row.Z.ToString('F1', $inv)
-                $script:KeyTimes[$sk] = $t
-            }
-        }
+        $hdr = [string]$e.Column.Header
+        $val = ""
+        try { $val = $e.EditingElement.Text } catch { }
+        $window.Dispatcher.BeginInvoke([Action]{
+            try {
+                if ( $hdr -eq "Time" ) {
+                    if ( $val -match '^\d{2}:\d{2}:\d{2}$' ) {
+                        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+                        $sk = $row.X.ToString('F1', $inv) + ";" + $row.Y.ToString('F1', $inv) + ";" + $row.Z.ToString('F1', $inv)
+                        $script:KeyTimes[$sk] = $val
+                    }
+                    return
+                }
+                if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null -or $script:CurrentMap -eq "" ) { return }
+                if ( $hdr -eq "FOV" -and $val -match '^\d+(\.\d+)?$' ) {
+                    $fv = [int][math]::Round([double]$val)
+                    Send-GameCommands @("FovIdx $n","FovVal $fv","FovApply") | Out-Null
+                }
+                if ( $hdr -eq "Speed" -and $val -match '^\d+(\.\d+)?$' ) {
+                    $sv = [int][math]::Round([double]$val)
+                    Send-GameCommands @("SpeedIdx $n","SpeedVal $sv","SpeedApply") | Out-Null
+                }
+            } catch { }
+        }) | Out-Null
     } catch { }
 })
 # v5.17.21 (#2 UX, финал): КЛИК ПО РЕДАКТИРУЕМОЙ ЯЧЕЙКЕ (Time/FOV/Speed):
@@ -2233,8 +2203,6 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
                 $dgv.CurrentCell = New-Object System.Windows.Controls.DataGridCellInfo($script:EditCell)
                 $dgv.BeginEdit()
                 $script:EditingNow = $true
-                # показать галочку/крестик в редактируемой строке
-                Show-RowEditActions
                 # каретка в конец, текст не выделен - выделение только по двойному клику
                 $tb = Find-VisualChildOfType $script:EditCell ([System.Windows.Controls.TextBox])
                 if ( $tb -ne $null ) {
@@ -2262,7 +2230,6 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
                             if ( $tb2 -ne $null ) {
                                 $tb2.SelectionLength = 0
                                 $tb2.CaretIndex = $tb2.Text.Length
-                                Show-RowEditActions
                                 $script:EditRetryTimer.Stop()
                                 return
                             }
@@ -2314,106 +2281,8 @@ function Commit-RowEdit {
     }
 }
 
-# галочка: подтвердить правки строки - пуш FOV/Speed в игру (если она на уровне) + бэкап
-function Accept-RowEdits([int]$n) {
-    try {
-        $row = $null
-        foreach ( $r in $script:KeyRows ) { if ( $r.Num -eq $n ) { $row = $r; break } }
-        if ( $row -eq $null ) { return }
-        if ( $script:ConfirmBypass -eq $false -and (Get-Process Game -ErrorAction SilentlyContinue) -ne $null -and $script:CurrentMap -ne "" ) {
-            $cmds = @("FovIdx $n", "FovVal $([int]$row.FOV)", "FovApply",
-                      "SpeedIdx $n", "SpeedVal $([int]$row.Speed)", "SpeedApply")
-            Send-GameCommands $cmds | Out-Null
-        }
-        if ( $script:RowSnapshots.ContainsKey($n) ) { $script:RowSnapshots.Remove($n) }
-        Save-KeysBackup
-        Set-Status "row $n edits applied"
-    } catch { }
-}
-# крестик: откатить строку к снимку до правок
-function Revert-RowEdits([int]$n) {
-    try {
-        if ( -not $script:RowSnapshots.ContainsKey($n) ) { return }
-        $snap = $script:RowSnapshots[$n]
-        foreach ( $r in $script:KeyRows ) {
-            if ( $r.Num -eq $n ) {
-                $r.X = $snap.X; $r.Y = $snap.Y; $r.Z = $snap.Z
-                $r.Yaw = $snap.Yaw; $r.Pitch = $snap.Pitch
-                $r.FOV = $snap.FOV; $r.Speed = $snap.Speed; $r.Time = $snap.Time
-                break
-            }
-        }
-        # время вернулось - вернуть и key-times
-        $inv = [System.Globalization.CultureInfo]::InvariantCulture
-        $sk = $snap.X.ToString('F1', $inv) + ";" + $snap.Y.ToString('F1', $inv) + ";" + $snap.Z.ToString('F1', $inv)
-        if ( $snap.Time -match '^\d{2}:\d{2}:\d{2}$' ) { $script:KeyTimes[$sk] = $snap.Time }
-        $script:RowSnapshots.Remove($n)
-        $new = New-Object System.Collections.ArrayList
-        foreach ( $r in $script:KeyRows ) { [void]$new.Add($r) }
-        $script:KeyRows = $new
-        Refresh-Table
-        Set-Status "row $n edits reverted"
-    } catch { }
-}
-
-# v5.17.19: галочка/крестик видны ТОЛЬКО в редактируемой строке.
-# Поиск EditActions-панели идёт по визуальному дереву СТРОКИ (Tag = Num строки,
-# имя панели фиксированное). Вызов - после BeginEdit и после коммита/отмены.
-function Set-RowEditActionsVisible([System.Windows.Controls.DataGridRow]$row, [bool]$vis) {
-    try {
-        if ( $row -eq $null ) { return }
-        $sp = Find-VisualChildByNameIn $row "EditActions"
-        if ( $sp -ne $null ) {
-            if ( $vis ) { $sp.Visibility = [System.Windows.Visibility]::Visible }
-            else { $sp.Visibility = [System.Windows.Visibility]::Collapsed }
-        }
-    } catch {
-    }
-}
-# PS 5.1: нет тернарника
-function Find-VisualChildByNameIn($parent, $name) {
-    if ( $parent -eq $null ) { return $null }
-    $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($parent)
-    for ( $i = 0; $i -lt $n; $i++ ) {
-        $c = [System.Windows.Media.VisualTreeHelper]::GetChild($parent, $i)
-        if ( $c -is [System.Windows.FrameworkElement] -and $c.Name -eq $name ) { return $c }
-        $r = Find-VisualChildByNameIn $c $name
-        if ( $r -ne $null ) { return $r }
-    }
-    return $null
-}
-function Show-RowEditActions {
-    try {
-        # редактируемая строка = сохранённая из клика ($script:EditRowC), не
-        # SelectedIndex (в момент отложенного BeginEdit он ещё -1/не тот)
-        $dg = $controls['DgKeys']
-        for ( $i = 0; $i -lt $dg.Items.Count; $i++ ) {
-            $r = $null
-            try { $r = $dg.ItemContainerGenerator.ContainerFromIndex($i) } catch { }
-            if ( $r -ne $null ) { Set-RowEditActionsVisible $r ($r -eq $script:EditRowC) }
-        }
-    } catch { }
-}
-function Hide-RowEditActions {
-    try {
-        $dg = $controls['DgKeys']
-        for ( $i = 0; $i -lt $dg.Items.Count; $i++ ) {
-            $r = $null
-            try { $r = $dg.ItemContainerGenerator.ContainerFromIndex($i) } catch { }
-            if ( $r -ne $null ) { Set-RowEditActionsVisible $r $false }
-        }
-    } catch { }
-}
-# коммит/отмена ячейки (клик мимо, Enter, Esc) - прячем галочку/крестик
-$controls['DgKeys'].Add_CellEditEnding({
-    param($sender, $e)
-    try {
-        $script:EditingNow = $false
-        $window.Dispatcher.BeginInvoke([Action]{
-            try { Hide-RowEditActions } catch { }
-        }) | Out-Null
-    } catch { }
-})
+# v5.17.22: галочка/крестик удалены (юзер) - сохранение на Enter и клик в любое
+# место панели (см. EditingNow-ветки и window Preview-хендлер), откат не нужен
 $controls['DgKeys'].Add_MouseDoubleClick({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -eq $null ) { return }
@@ -2769,8 +2638,6 @@ $script:LocData = @{
         TipGithub = "Open the GitHub repository"
         TipNoWindow = "can't see the game window"
         TipInMenu = "the game is in the menu - load a map first"
-        TipAcceptRow = "apply this row's edits (FOV/speed go to the game)"
-        TipCancelRow = "revert this row's edits"
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -2805,8 +2672,6 @@ $script:LocData = @{
         TipGithub = "Открыть репозиторий на GitHub"
         TipNoWindow = "не видно активного окна игры"
         TipInMenu = "игра в меню - сначала загрузи карту"
-        TipAcceptRow = "применить правки этой строки (FOV/скорость уйдут в игру)"
-        TipCancelRow = "откатить правки этой строки"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
