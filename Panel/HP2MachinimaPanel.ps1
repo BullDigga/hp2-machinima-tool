@@ -1273,8 +1273,8 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <!-- видны, пока курсор где-либо над таблицей (IsMouseOver грида) -->
                 <Button x:Name="PillBtn" Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
                         Width="16" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
-                        Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Top"
-                        Margin="4,-6,0,0" ToolTip="{DynamicResource TipInsertRow}"
+                        Background="#E02F9E44" Foreground="White" HorizontalAlignment="Right" VerticalAlignment="Top"
+                        Margin="0,-6,2,0" ToolTip="{DynamicResource TipInsertRow}"
                         Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource BoolToVis}}"/>
                 <!-- у строки 0 глиф "+" рисует АДОРНЕР (верхняя половина пилюли лежит НА
                      шапке, кнопка клипуется вьюпортом) - глушим глиф кнопки, Content="+"
@@ -1837,7 +1837,7 @@ function Update-PillAdorner {
             # (включая Margin грида), поэтому TranslatePoint именно к слою - иначе
             # эллипс уезжает на 12 WPF (маргин) вверх-влево
             $p = $row0.TranslatePoint([System.Windows.Point]::new(0,0), $script:PillAdorner.Parent)
-            $script:PillAX = $p.X + 12   # центр пилюли: Margin 4 слева + половина ширины 16
+            $script:PillAX = $p.X + 26   # центр пилюли: правый край (# 36 - margin 2) - половина ширины 16
             $script:PillAY = $p.Y        # верх строки 0 = стык с шапкой
         }
         if ( $script:PillAX -gt 0 -and $dg.Items.Count -gt 0 -and $dg.IsMouseOver ) {
@@ -2194,17 +2194,19 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
         # клик по УЖЕ редактируемой ячейке - не трогаем (позиция каретки в TextBox,
         # выделение мышью); коммита нет, правка продолжается
         if ( $cell -ne $null -and $cell.IsEditing ) { return }
-        # активная правка + клик по ДРУГОЙ ячейке или свободному месту = коммит
-        # предыдущей; правка новой (если ячейка редактируемая) - следующим deferred
-        $commitPending = $false
+        # активная правка + клик по ДРУГОЙ ячейке = коммит берёт на себя DataGrid
+        # (нативно, при смене ячейки); Commit-RowEdit здесь НЕ нужен - его
+        # BtnRefresh-фокус ломал последующий BeginEdit. Свободное место - ниже
         if ( $script:EditingNow ) {
             $script:EditingNow = $false
-            $commitPending = $true
-            $window.Dispatcher.BeginInvoke([Action]{
-                try { Commit-RowEdit } catch { }
-            }) | Out-Null
+            if ( $cell -eq $null ) {
+                $window.Dispatcher.BeginInvoke([Action]{
+                    try { Commit-RowEdit } catch { }
+                }) | Out-Null
+                return
+            }
         }
-        if ( $cell -eq $null -or $cell.IsReadOnly ) { return }
+        if ( $cell.IsReadOnly ) { return }
         if ( [string]$cell.Column.Header -eq "#" ) { return }
         # строка-контейнер для BeginEdit(unit, row)
         $drow = $null
@@ -2233,6 +2235,37 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
                 if ( $tb -ne $null ) {
                     $tb.SelectionLength = 0
                     $tb.CaretIndex = $tb.Text.Length
+                }
+                # v5.17.21.2: клик по другой ячейке ПРИ активной правке - native commit
+                # предыдущей строки может ещё не завершиться к этому моменту, BeginEdit
+                # молча отказывает. Повторяем попытку, пока TextBox не появится (3x60ms)
+                if ( $tb -eq $null ) {
+                    $script:EditRetryLeft = 3
+                    $script:EditRetryTimer = New-Object System.Windows.Threading.DispatcherTimer
+                    $script:EditRetryTimer.Interval = [TimeSpan]::FromMilliseconds(60)
+                    $script:EditRetryTimer.Add_Tick({
+                        try {
+                            $tb2 = Find-VisualChildOfType $script:EditCell ([System.Windows.Controls.TextBox])
+                            if ( $tb2 -ne $null ) {
+                                $tb2.SelectionLength = 0
+                                $tb2.CaretIndex = $tb2.Text.Length
+                                $script:EditRetryTimer.Stop()
+                                return
+                            }
+                            $controls['DgKeys'].BeginEdit()
+                            $tb2 = Find-VisualChildOfType $script:EditCell ([System.Windows.Controls.TextBox])
+                            if ( $tb2 -ne $null ) {
+                                $tb2.SelectionLength = 0
+                                $tb2.CaretIndex = $tb2.Text.Length
+                                Show-RowEditActions
+                                $script:EditRetryTimer.Stop()
+                                return
+                            }
+                            $script:EditRetryLeft--
+                            if ( $script:EditRetryLeft -le 0 ) { $script:EditRetryTimer.Stop() }
+                        } catch { $script:EditRetryTimer.Stop() }
+                    })
+                    $script:EditRetryTimer.Start()
                 }
             } catch { }
         }) | Out-Null
