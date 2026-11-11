@@ -348,8 +348,15 @@ function Confirm-GameActive {
             return $false
         }
         if ( $script:CurrentMap -ne "" ) { return $true }
-        $h = Find-GameWindow
-        if ( $h -ne [IntPtr]::Zero ) { Focus-GameWindow $h | Out-Null }
+        # v5.17.28.3: без вьюпорта (меню/загрузка) уровня нет - фокус не трогаем,
+        # ждём не циклом, а честным отказом (зонд всё равно не напечатается)
+        $vw2 = [GameCtl]::FindWindowW("GameUnrealWWindowsViewportWindow", [NullString]::Value)
+        if ( $vw2 -eq [IntPtr]::Zero ) {
+            Set-Status $script:LocData[$script:Lang].TipInMenu "err"
+            return $false
+        }
+        $h = $vw2
+        Focus-GameWindow $h | Out-Null
         for ( $i = 0; $i -lt 6; $i++ ) {
             Wait-Pump 500
             $script:ConfirmBypass = $true
@@ -382,6 +389,15 @@ function Send-GameCommands([string[]]$cmds) {
         Set-Status ("typing $($cmds.Count) cmd(s): $dbg") "warn"
         $h = Find-GameWindow
         if ($h -eq [IntPtr]::Zero) { Stop-Spin; return "game window not found!" }
+        # v5.17.28.3: КРИТИЧНО - печатаем ТОЛЬКО в окно вьюпорта (окно уровня).
+        # В меню фронтенда вьюпорта нет, а Find-GameWindow тогда возвращает окно
+        # "Main" - и буквы команды падали прямо в поля меню (юзер видел "thD" в
+        # поле GState). Нет вьюпорта = игра не на уровне = не печатаем ничего
+        $vw = [GameCtl]::FindWindowW("GameUnrealWWindowsViewportWindow", [NullString]::Value)
+        if ( $vw -eq [IntPtr]::Zero -or $vw -ne $h ) {
+            Stop-Spin
+            return "game is not on a level (no viewport window) - typing skipped"
+        }
         if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
         # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
         # Обычный ` остаётся терминалом пользователя.
@@ -600,7 +616,30 @@ function Sync-FromLog([switch]$Force) {
     # v5.8: асинхронно - скан памяти в C#-потоке, UI и крутящийся ⟳ живут.
     # Завершение разбора - в Complete-SyncFromLog (вызывается из таймера).
     # v5.17.3: возвращает $true если синк запущен/выполнен, $false - отклонён (SyncBusy)
-    if ( $script:SyncBusy ) { return $false }
+    $gpChk = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+    # v5.17.28.4: фронтенд при "Play Map!" ПЕРЕЗАПУСКАЕТ игру новым процессом.
+    # Если асинхронный скан висел на старом pid, Complete-SyncFromLog никогда
+    # не придёт - SyncBusy/SendBusy зависают навсегда и панель перестаёт видеть
+    # игру ("я в игре, а панель всё серое"). Сброс зависших флагов:
+    if ( $gpChk -ne $null -and $script:ScanCache.Pid -ne 0 -and $script:ScanCache.Pid -ne $gpChk.Id ) {
+        $script:SyncBusy = $false
+        $script:SendBusy = $false
+        $script:ScanCache.Pid = 0
+        $script:ScanCache.Regions = @()
+        # КРИТИЧНО (v5.17.28.5): новый процесс начинает seq с 1 - старый LastSeq
+        # (сотни событий прошлого сеанса) отбрасывал ВЕСЬ дамп фильтром
+        # "newMax <= LastSeq" наверху синка, и карта никогда не определялась.
+        $script:ScanCache.LastSeq = 0
+        $script:LastGen = 0
+        $Force = $true
+    }
+    # защита от зависшего скана на ТОМ ЖЕ pid (процесс умер посреди чтения памяти)
+    if ( $script:SyncBusy ) {
+        if ( $script:SyncStartedAt -ne $null -and ((Get-Date) - $script:SyncStartedAt).TotalSeconds -gt 20 ) {
+            $script:SyncBusy = $false
+            $Force = $true
+        } else { return $false }
+    }
     $lf = Find-LogFile
     if ( $lf -ne "" ) {
         try {
@@ -624,6 +663,7 @@ function Sync-FromLog([switch]$Force) {
     if ( -not $Force -and $script:ScanCache.Pid -eq $gp.Id -and $script:ScanCache.Regions.Count -ge 2 ) { $pairs = [long[]]$script:ScanCache.Regions }
     $script:LastScanFast = ($pairs -ne $null)
     $script:SyncBusy = $true
+    $script:SyncStartedAt = Get-Date
     $script:SyncForce = [bool]$Force
     Start-Spin
     [MemScanPanel]::StartAsync($gp.Id, $pairs)
@@ -736,6 +776,17 @@ function Complete-SyncFromLogInner {
         foreach ( $m in $rxEv.Matches($txt) ) {
             $ev += New-Object PSObject -Property @{Gen=[long]$m.Groups[1].Value; Seq=[long]$m.Groups[2].Value; T=$m.Groups[3].Value; D=$m.Groups[4].Value}
         }
+        # v5.17.28.5: MAP-событие уровня может лежать в ПРЕДЫДУЩЕМ поколении:
+        # фронтенд ("Play Map!") пишет MAP|<карта> ДО инкремента поколения, так что
+        # фильтр "только maxGen" выбрасывал его, и панель не видела уровень.
+        # Последний MAP по позиции в буфере = текущий уровень (буфер хронологический)
+        $lastMap = ""
+        foreach ( $mMap in [regex]::Matches($txt, 'PATHEV:\d+:\d+\|MAP\|([0-9A-Za-z_]+)') ) {
+            $lastMap = $mMap.Groups[1].Value
+        }
+        if ( $lastMap -ne "" ) {
+            Update-SelectionButtons
+        }
         # v5.16: ПОКОЛЕНИЯ. Уровень сменился - движок сбрасывает seq в 1 и инкрементирует
         # поколение (в самом событии). Играем только события текущего поколения:
         # старый уровень больше никогда не вмешается, копии буфера отфильтруются по Gen.
@@ -789,7 +840,7 @@ function Complete-SyncFromLogInner {
                 }
                 'DUMPMAP' {
                     # v5.17.1: имя карты в дампе - панель определяет уровень даже без -log
-                    if ( $e.D -ne "" ) { $script:CurrentMap = $e.D }
+                    if ( $e.D -match '^[0-9A-Za-z_]+$' ) { $script:CurrentMap = $e.D }
                 }
                 'KEY'   {
                     # KEY|i,x,y,z,yaw,pitch,fov,spd - строка снапшота пути (только внутри DUMP)
@@ -830,7 +881,7 @@ function Complete-SyncFromLogInner {
                 }
                 'MAP'   {
                     # v5.6: имя карты идёт в том же PATHEV-потоке (событие от BaseCam.PathLogMap)
-                    if ( $e.D -ne "" ) { $script:CurrentMap = $e.D }
+                    if ( $e.D -match '^[0-9A-Za-z_]+$' ) { $script:CurrentMap = $e.D }
                 }
                 'PLAYEND' {
                     # v5.7: проигрывание закончилось само - гасим красный Stop
@@ -956,6 +1007,13 @@ function Complete-SyncFromLogInner {
         $script:UserClearPending = $false
         $script:KeyRows = $rows
         Refresh-Table
+        # v5.17.28.5: current level = last MAP event of the buffer. The frontend
+        # ("Play Map!") writes MAP BEFORE the generation increment, so the maxGen
+        # filter dropped it; applying at sync end also keeps a garbage DUMPMAP
+        # (save path cut to "C:" by the regex) from overwriting the map name
+        if ( $lastMap -ne "" -and $script:CurrentMap -ne $lastMap ) {
+            $script:CurrentMap = $lastMap
+        }
         Update-SelectionButtons
         if ( $rows.Count -eq 0 -and $wasClear ) {
             # явная очистка в игре - бэкап тоже пустеет
@@ -1541,20 +1599,26 @@ function Update-MapPreview {
     # понятное название + техническое имя файла). v5.17.25: только большая
     # кнопка - старый блок названия+превью удалён как дубликат
     try {
-        $map = $script:KeyMap
+        # v5.17.28.5: карточка показывает ТЕКУЩУЮ карту игры (CurrentMap), а не карту
+        # кадров (KeyMap): юзер в игре без кадров видел пустой чип вместо карты.
+        # Кадровая карта важна только когда игра не на уровне (офлайн-режим)
+        $map = $script:CurrentMap
+        if ( $map -eq "" ) { $map = $script:KeyMap }
         # v5.17.27: два состояния карточки. Игра не на карте (закрыта/меню) ->
         # в карточке ТОЛЬКО метка MAP справа сверху (юзер), кнопка серая.
         # Карта загружена -> метка не нужна (имя+превью говорят сами за себя)
         $gameOn = ( $script:CurrentMap -ne "" )
         if ( -not $gameOn -or $map -eq "" ) {
+            # v5.17.28: игра не видна - кнопка АКТИВНА и запускает игру на карте,
+            # выбранной в пикере (юзер передумал насчёт серой кнопки)
             $controls['TbMapLabel'].Visibility = [System.Windows.Visibility]::Visible
             $controls['ImgSwitchThumb'].Visibility = [System.Windows.Visibility]::Collapsed
             $controls['TbSwitchFriendly'].Visibility = [System.Windows.Visibility]::Collapsed
             $controls['TbSwitchTech'].Visibility = [System.Windows.Visibility]::Collapsed
-            $controls['BtnMapSwitch'].IsEnabled = $false
+            $controls['BtnMapSwitch'].IsEnabled = $true
             $controls['BtnMapSwitch'].Height = 48
             $L = $script:LocData[$script:Lang]
-            $controls['BtnMapSwitch'].ToolTip = $L.TipNoGame
+            $controls['BtnMapSwitch'].ToolTip = $L.TipLaunchMap
             return
         }
         $controls['BtnMapSwitch'].IsEnabled = $true
@@ -2424,15 +2488,136 @@ function Switch-ToMap([string]$map) {
     # РІС‹Р±РѕСЂ РєР°СЂС‚С‹ РёР· РїРёРєРµСЂР°: РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёРµ Рѕ СЃР±СЂРѕСЃРµ РїСѓС‚Рё + open <map>
     try {
         $L = $script:LocData[$script:Lang]
-        if ( $script:KeyRows.Count -gt 0 ) {
-            $r = [System.Windows.MessageBox]::Show($L.MapWarnQ, $(if ( $script:Lang -eq "ru" ) { "РЎРјРµРЅР° РєР°СЂС‚С‹" } else { "Switch map" }), 'YesNo', 'Question')
+        $gameRun = ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null )
+        if ( $gameRun -and $script:KeyRows.Count -gt 0 ) {
+            $r = [System.Windows.MessageBox]::Show($L.MapWarnQ, $(if ( $script:Lang -eq "ru" ) { "Смена карты" } else { "Switch map" }), 'YesNo', 'Question')
             if ( $r -ne 'Yes' ) { return }
+        }
+        # v5.17.28: игра закрыта - кнопка карты ЗАПУСКАЕТ игру на выбранном уровне
+        if ( -not $gameRun ) {
+            Start-LaunchSequence $map
+            return
         }
         Set-Status ("switching to " + $map + "...")
         $st = Send-GameCommand ("open " + $map)
         Set-Status ($st + " | " + $(if ( $script:Lang -eq "ru" ) { "РєР°СЂС‚Р° " } else { "map " }) + $map)
     } catch { }
 }
+# ---------- v5.17.28: запуск игры на выбранной карте (игра не запущена) ----------
+# юзер: "если игру панель не видит - пусть эта кнопка запускает игру на выбираемом
+# уровне". Пикер закрываем, дальше живёт стейт-машина на DispatcherTimer (UI-поток):
+# boot (старт Start Game with Log.bat) -> waitwin (окно игры) -> send (open <map>
+# штатной консольной печатью панели, ConfirmBypass) -> waitmap (по CurrentMap)
+$script:GameDir = "F:\Harry Potter and the Chamber of Secrets"
+# перечислитель окон: нужен класс GameUnrealWM212Log (окно лога - ЕДИНСТВЕННЫЙ
+# надёжный канал команд, пока игра в меню: тихая консоль вьюпорта в меню молчит)
+if ( -not ('HP2WinEnum' -as [type]) ) {
+    Add-TypeCached -TypeName 'HP2WinEnum' -Source @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class HP2WinEnum {
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lp);
+    [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+    public delegate bool EnumWindowsProc(IntPtr h, IntPtr lp);
+    public static IntPtr FindByClass(string cls) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows(delegate(IntPtr h, IntPtr lp) {
+            StringBuilder sb = new StringBuilder(256);
+            GetClassName(h, sb, 256);
+            if ( sb.ToString() == cls ) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+}
+"@
+}
+function Find-LogConsoleWindow {
+    try { return [HP2WinEnum]::FindByClass("GameUnrealWM212Log") } catch { return [IntPtr]::Zero }
+}
+$script:LaunchSeq = $null
+function Start-LaunchSequence([string]$map) {
+    try { if ( $script:MPWin -ne $null ) { $script:MPWin.Close() } } catch { }
+    $script:LaunchSeq = @{ Map = $map; Stage = "boot"; Tries = 0; Sent = 0 }
+    $ru = ( $script:Lang -eq "ru" )
+    Set-Status ($(if ( $ru ) { "запускаю игру для карты " } else { "launching game for map " }) + $map + "...") "warn"
+    $script:LaunchTimer.Start()
+}
+function Fail-Launch([string]$why) {
+    $ru = ( $script:Lang -eq "ru" )
+    $script:LaunchSeq = $null
+    $script:LaunchTimer.Stop()
+    Set-Status ($(if ( $ru ) { "не удалось запустить игру: " } else { "launch failed: " }) + $why) "err"
+}
+$script:LaunchTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:LaunchTimer.Interval = [TimeSpan]::FromSeconds(2)
+$script:LaunchTimer.Add_Tick({
+    if ( $script:LaunchSeq -eq $null ) { $script:LaunchTimer.Stop(); return }
+    $L = $script:LaunchSeq
+    $ru = ( $script:Lang -eq "ru" )
+    try {
+        switch ( $L.Stage ) {
+            "boot" {
+                if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) { $L.Stage = "waitwin"; $L.Tries = 0; return }
+                if ( $L.Sent -eq 0 ) {
+                    $L.Sent = 1
+                    Start-Process -FilePath (Join-Path $script:GameDir "system\Start Game with Log.bat") -WorkingDirectory (Join-Path $script:GameDir "system")
+                }
+                $L.Tries++
+                if ( $L.Tries -gt 10 ) { Fail-Launch $(if ( $ru ) { "процесс игры не появился" } else { "game process did not appear" }) }
+            }
+            "waitwin" {
+                if ( (Find-GameWindow) -ne [IntPtr]::Zero ) { $L.Stage = "settle"; $L.Tries = 0; return }
+                $L.Tries++
+                if ( $L.Tries -gt 45 ) { Fail-Launch $(if ( $ru ) { "окно игры не появилось" } else { "game window did not appear" }) }
+            }
+            "settle" {
+                # интро-заставки ~20с глотают ввод: окно вьюпорта появляется с самого
+                # старта, но меню ещё не живое - ждём перед первой отправкой
+                $L.Tries++
+                if ( $L.Tries -ge 12 ) { $L.Stage = "send"; $L.Tries = 0 }
+            }
+            "send" {
+                # v5.17.28.2: тихая консоль вьюпорта в ГЛАВНОМ МЕНЮ молчит (зонды
+                # PathDumpKeys не возвращают дампы) - печатаем open <map> прямо в
+                # окно лога GameUnrealWM212Log: оно живёт с старта и принимает
+                # команды в любом состоянии. SendKeys - юникод, раскладка не важна
+                $cw = Find-LogConsoleWindow
+                if ( $cw -eq [IntPtr]::Zero ) {
+                    $L.Tries++
+                    if ( $L.Tries -gt 15 ) { Fail-Launch $(if ( $ru ) { "окно лога игры не найдено" } else { "game log window not found" }) }
+                    return
+                }
+                [void][GameCtl]::SetForegroundWindow($cw)
+                Start-Sleep -Milliseconds 400
+                Add-Type -AssemblyName System.Windows.Forms
+                [System.Windows.Forms.SendKeys]::SendWait(("open " + $L.Map + "{ENTER}"))
+                $L.Sent++
+                $L.Stage = "waitmap"
+                $L.Tries = 0
+                Set-Status ($(if ( $ru ) { "загружаю карту " } else { "loading map " }) + $L.Map + "...") "warn"
+            }
+            "waitmap" {
+                Sync-FromLog -Force
+                if ( $script:CurrentMap -ieq $L.Map ) {
+                    $script:LaunchSeq = $null
+                    $script:LaunchTimer.Stop()
+                    Set-Status ($(if ( $ru ) { "игра запущена на карте " } else { "game launched on map " }) + $L.Map)
+                    return
+                }
+                $L.Tries++
+                if ( $L.Tries -ge 6 ) {
+                    if ( $L.Sent -lt 5 ) { $L.Stage = "send" }
+                    else { Fail-Launch $(if ( $ru ) { "карта не загрузилась" } else { "map did not load" }) }
+                }
+            }
+        }
+    } catch {
+        Fail-Launch $_.Exception.Message
+    }
+})
+
 function Build-MapRows {
     # v5.17.24: СЃС‚СЂРѕРєРё РїРёРєРµСЂР° РІ СЃС‚РёР»Рµ СЂРµС„РµСЂРµРЅСЃР° - РїСЂРµРІСЊСЋ, РёРјСЏ + Р±РµР№РґР¶ РєР°С‚РµРіРѕСЂРёРё +
     # С‚РµС….РёРјСЏ, Р·РІРµР·РґР°, Launch. РўРµРјР° - С‡РµСЂРµР· СЂРµСЃСѓСЂСЃС‹ РіР»Р°РІРЅРѕРіРѕ РѕРєРЅР°
@@ -2942,7 +3127,7 @@ $controls['LogPopupBorder'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $scri
 $script:SelDep = @('BtnFovKey','BtnKeySpeed')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed','BtnMapSwitch')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
@@ -3168,6 +3353,7 @@ $script:LocData = @{
         TipWrongMap = "Keyframes belong to a different map - load it or clear the table"
         TipNoGame = "The game is not running on a level - launch the game and load a map"
         TipMapsDir = "Choose the folder with .unr maps"
+        TipLaunchMap = "The game is not running - click to open the map picker and launch the game on the selected map"
         TipInsertRow = "insert CURRENT camera keyframe here (between this and the previous row)"
         TipGotoRow = "preview this keyframe (jump the camera to it)"
         TipDelRow = "delete this keyframe"
@@ -3206,6 +3392,7 @@ $script:LocData = @{
         TipWrongMap = "Кадры с другой карты - загрузите её или очистите таблицу"
         TipNoGame = "Игра не запущена на уровне - запусти игру и выбери карту"
         TipMapsDir = "Выбрать папку с картами .unr"
+        TipLaunchMap = "Игра не запущена - откройте выбор карты и запустите игру на выбранной карте"
         TipInsertRow = "вставить ТЕКУЩИЙ кадр камеры сюда (между этой и предыдущей строкой)"
         TipGotoRow = "посмотреть, как выглядит этот кадр (камера перейдёт к нему)"
         TipDelRow = "удалить этот кадр"
