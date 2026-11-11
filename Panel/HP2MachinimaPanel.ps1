@@ -190,6 +190,7 @@ public class MemScanPanel {
             long regA = hitRegs[r];
             long regS = hitRegs[r + 1];
             var seen = new System.Collections.Generic.HashSet<long>();
+            var seenL = new System.Collections.Generic.HashSet<long>();
             long pos = 0;
             while ( pos < regS ) {
                 int toRead = (int)Math.Min(regS - pos + overlap, buf.Length);
@@ -198,12 +199,45 @@ public class MemScanPanel {
                 if ( ReadProcessMemory(h, (IntPtr)(regA + pos), buf, (IntPtr)toRead, out rd) ) {
                     int n = rd.ToInt32();
                     string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
+                    var evIdx = new System.Collections.Generic.List<int>();
+                    var evGen = new System.Collections.Generic.List<int>();
                     for ( int i = s.IndexOf("PATHEV:"); i >= 0; i = s.IndexOf("PATHEV:", i + 7) ) {
                         long abs = (pos >> 1) + i;
                         if ( !seen.Add(abs) ) continue;
                         int en = i;
                         while ( en < s.Length && s[en] >= 32 ) en++;
                         sb.Append(s.Substring(i, en - i) + "\n");
+                        // gen каждого события - привязка для PLVL-строк (v5.17.29)
+                        int q = i + 7;
+                        long gv = 0; bool gok = false;
+                        while ( q < en && s[q] >= '0' && s[q] <= '9' ) { gok = true; gv = gv * 10 + (s[q] - '0'); q++; }
+                        if ( gok ) { evIdx.Add(i); evGen.Add(gv > int.MaxValue ? int.MaxValue : (int)gv); }
+                    }
+                    // v5.17.29: смена уровня ВО ВРЕМЯ ИГРЫ (переходы-триггеры, die-телепорт)
+                    // НЕ пишет MAP-событие - поколение инкрементируется, а имя уровня нигде
+                    // нет. Движок при каждой загрузке уровня пишет в лог
+                    // "Possessed PlayerPawn: <pawn> <Map>.<Actor>" - выгружаем как
+                    // PLVL:<gen>|<map>, где gen = поколение СЛЕДУЮЩЕГО PATHEV-события
+                    // (строка пишется сразу после загрузки нового уровня). Строки формата
+                    // ("%s..." в статических таблицах) отсекаются проверкой charset пешки
+                    // и обязательным "Possessed " перед "PlayerPawn: ".
+                    int l = s.IndexOf("Possessed PlayerPawn: ");
+                    while ( l >= 0 ) {
+                        long labs = (pos >> 1) + l;
+                        if ( seenL.Add(labs) && l >= 12 ) {
+                            int ws = l + 22, we = ws;
+                            while ( we < s.Length && s[we] > 32 && s[we] != '%' ) we++;
+                            if ( we > ws && we < s.Length && s[we] == 32 ) {
+                                int ms2 = we + 1, me2 = ms2;
+                                while ( me2 < s.Length && (char.IsLetterOrDigit(s[me2]) || s[me2] == '_') ) me2++;
+                                if ( me2 > ms2 && me2 < s.Length && s[me2] == '.' ) {
+                                    int gidx = -1;
+                                    for ( int k2 = 0; k2 < evIdx.Count; k2++ ) { if ( evIdx[k2] > l ) { gidx = k2; break; } }
+                                    if ( gidx >= 0 ) sb.Append("PLVL:" + evGen[gidx] + "|" + s.Substring(ms2, me2 - ms2) + "\n");
+                                }
+                            }
+                        }
+                        l = s.IndexOf("Possessed PlayerPawn: ", l + 22);
                     }
                 }
                 pos += chunk;
@@ -228,6 +262,7 @@ public class MemScanPanel {
             long regA = pairs[r];
             long regS = pairs[r + 1];
             var seen = new System.Collections.Generic.HashSet<long>();
+            var seenL = new System.Collections.Generic.HashSet<long>();
             long pos = 0;
             while ( pos < regS ) {
                 int toRead = (int)Math.Min(regS - pos + overlap, buf.Length);
@@ -236,12 +271,45 @@ public class MemScanPanel {
                 if ( ReadProcessMemory(h, (IntPtr)(regA + pos), buf, (IntPtr)toRead, out rd) ) {
                     int n = rd.ToInt32();
                     string s = System.Text.Encoding.Unicode.GetString(buf, 0, n);
+                    var evIdx = new System.Collections.Generic.List<int>();
+                    var evGen = new System.Collections.Generic.List<int>();
                     for ( int i = s.IndexOf("PATHEV:"); i >= 0; i = s.IndexOf("PATHEV:", i + 7) ) {
                         long abs = (pos >> 1) + i;
                         if ( !seen.Add(abs) ) continue;
                         int en = i;
                         while ( en < s.Length && s[en] >= 32 ) en++;
                         sb.Append(s.Substring(i, en - i) + "\n");
+                        // gen каждого события - привязка для PLVL-строк (v5.17.29)
+                        int q = i + 7;
+                        long gv = 0; bool gok = false;
+                        while ( q < en && s[q] >= '0' && s[q] <= '9' ) { gok = true; gv = gv * 10 + (s[q] - '0'); q++; }
+                        if ( gok ) { evIdx.Add(i); evGen.Add(gv > int.MaxValue ? int.MaxValue : (int)gv); }
+                    }
+                    // v5.17.29: смена уровня ВО ВРЕМЯ ИГРЫ (переходы-триггеры, die-телепорт)
+                    // НЕ пишет MAP-событие - поколение инкрементируется, а имя уровня нигде
+                    // нет. Движок при каждой загрузке уровня пишет в лог
+                    // "Possessed PlayerPawn: <pawn> <Map>.<Actor>" - выгружаем как
+                    // PLVL:<gen>|<map>, где gen = поколение СЛЕДУЮЩЕГО PATHEV-события
+                    // (строка пишется сразу после загрузки нового уровня). Строки формата
+                    // ("%s..." в статических таблицах) отсекаются проверкой charset пешки
+                    // и обязательным "Possessed " перед "PlayerPawn: ".
+                    int l = s.IndexOf("Possessed PlayerPawn: ");
+                    while ( l >= 0 ) {
+                        long labs = (pos >> 1) + l;
+                        if ( seenL.Add(labs) && l >= 12 ) {
+                            int ws = l + 22, we = ws;
+                            while ( we < s.Length && s[we] > 32 && s[we] != '%' ) we++;
+                            if ( we > ws && we < s.Length && s[we] == 32 ) {
+                                int ms2 = we + 1, me2 = ms2;
+                                while ( me2 < s.Length && (char.IsLetterOrDigit(s[me2]) || s[me2] == '_') ) me2++;
+                                if ( me2 > ms2 && me2 < s.Length && s[me2] == '.' ) {
+                                    int gidx = -1;
+                                    for ( int k2 = 0; k2 < evIdx.Count; k2++ ) { if ( evIdx[k2] > l ) { gidx = k2; break; } }
+                                    if ( gidx >= 0 ) sb.Append("PLVL:" + evGen[gidx] + "|" + s.Substring(ms2, me2 - ms2) + "\n");
+                                }
+                            }
+                        }
+                        l = s.IndexOf("Possessed PlayerPawn: ", l + 22);
                     }
                 }
                 pos += chunk;
@@ -1011,7 +1079,18 @@ function Complete-SyncFromLogInner {
         # ("Play Map!") writes MAP BEFORE the generation increment, so the maxGen
         # filter dropped it; applying at sync end also keeps a garbage DUMPMAP
         # (save path cut to "C:" by the regex) from overwriting the map name
-        if ( $lastMap -ne "" -and $script:CurrentMap -ne $lastMap ) {
+        # v5.17.29: смена уровня ВО ВРЕМЯ ИГРЫ не пишет MAP-событие вообще
+        # (die-телепорт, переходы-триггеры) - последнее MAP в буфере остаётся от
+        # СТАРОЙ карты и панель навсегда залипает на ней. PLVL:<gen>|<map> из
+        # "Possessed PlayerPawn: <pawn> <map>.<actor>" привязан к поколению нового
+        # уровня - приоритет у PLVL для текущего maxGen, lastMap - фолбэк
+        $plvlMap = ""
+        foreach ( $mPl in [regex]::Matches($txt, 'PLVL:(\d+)\|([0-9A-Za-z_]+)') ) {
+            if ( $mPl.Groups[1].Value -eq [string]$maxGen ) { $plvlMap = $mPl.Groups[2].Value }
+        }
+        if ( $plvlMap -ne "" ) {
+            if ( $script:CurrentMap -ne $plvlMap ) { $script:CurrentMap = $plvlMap }
+        } elseif ( $lastMap -ne "" -and $script:CurrentMap -ne $lastMap ) {
             $script:CurrentMap = $lastMap
         }
         Update-SelectionButtons
