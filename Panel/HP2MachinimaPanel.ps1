@@ -221,6 +221,11 @@ public class MemScanPanel {
                     // (строка пишется сразу после загрузки нового уровня). Строки формата
                     // ("%s..." в статических таблицах) отсекаются проверкой charset пешки
                     // и обязательным "Possessed " перед "PlayerPawn: ".
+                    // v5.17.30.3: если ПОСЛЕ строки PATHEV в этой копии буфера нет (панель
+                    // ещё не слала команд: смерть на уровне без зондов - CurrentMap не
+                    // пуст, полл-ветка с PathDumpKeys молчит), берём gen ПОСЛЕДНЕГО
+                    // PATHEV ДО строки + 1: движок инкрементирует поколение ЗАГРУЗКОЙ
+                    // уровня, Possessed пишется сразу после инкремента - детерминированно
                     int l = s.IndexOf("Possessed PlayerPawn: ");
                     while ( l >= 0 ) {
                         long labs = (pos >> 1) + l;
@@ -233,7 +238,10 @@ public class MemScanPanel {
                                 if ( me2 > ms2 && me2 < s.Length && s[me2] == '.' ) {
                                     int gidx = -1;
                                     for ( int k2 = 0; k2 < evIdx.Count; k2++ ) { if ( evIdx[k2] > l ) { gidx = k2; break; } }
-                                    if ( gidx >= 0 ) sb.Append("PLVL:" + evGen[gidx] + "|" + s.Substring(ms2, me2 - ms2) + "\n");
+                                    long gOut = -1;
+                                    if ( gidx >= 0 ) gOut = evGen[gidx];
+                                    else if ( evGen.Count > 0 ) gOut = (long)evGen[evGen.Count - 1] + 1;   // v5.17.30.3
+                                    if ( gOut >= 0 ) sb.Append("PLVL:" + gOut + "|" + s.Substring(ms2, me2 - ms2) + "\n");
                                 }
                             }
                         }
@@ -293,6 +301,11 @@ public class MemScanPanel {
                     // (строка пишется сразу после загрузки нового уровня). Строки формата
                     // ("%s..." в статических таблицах) отсекаются проверкой charset пешки
                     // и обязательным "Possessed " перед "PlayerPawn: ".
+                    // v5.17.30.3: если ПОСЛЕ строки PATHEV в этой копии буфера нет (панель
+                    // ещё не слала команд: смерть на уровне без зондов - CurrentMap не
+                    // пуст, полл-ветка с PathDumpKeys молчит), берём gen ПОСЛЕДНЕГО
+                    // PATHEV ДО строки + 1: движок инкрементирует поколение ЗАГРУЗКОЙ
+                    // уровня, Possessed пишется сразу после инкремента - детерминированно
                     int l = s.IndexOf("Possessed PlayerPawn: ");
                     while ( l >= 0 ) {
                         long labs = (pos >> 1) + l;
@@ -305,7 +318,10 @@ public class MemScanPanel {
                                 if ( me2 > ms2 && me2 < s.Length && s[me2] == '.' ) {
                                     int gidx = -1;
                                     for ( int k2 = 0; k2 < evIdx.Count; k2++ ) { if ( evIdx[k2] > l ) { gidx = k2; break; } }
-                                    if ( gidx >= 0 ) sb.Append("PLVL:" + evGen[gidx] + "|" + s.Substring(ms2, me2 - ms2) + "\n");
+                                    long gOut = -1;
+                                    if ( gidx >= 0 ) gOut = evGen[gidx];
+                                    else if ( evGen.Count > 0 ) gOut = (long)evGen[evGen.Count - 1] + 1;   // v5.17.30.3
+                                    if ( gOut >= 0 ) sb.Append("PLVL:" + gOut + "|" + s.Substring(ms2, me2 - ms2) + "\n");
                                 }
                             }
                         }
