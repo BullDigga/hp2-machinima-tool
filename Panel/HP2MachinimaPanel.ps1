@@ -1380,6 +1380,9 @@ function Send-PathSaveAndSync([string]$prefix) {
           <Image Name="ImgMapPreview" Grid.Column="1" Width="72" Height="54" Stretch="Uniform"
                  HorizontalAlignment="Right" VerticalAlignment="Top"/>
         </Grid>
+        <Button Name="BtnMapSwitch" Content="⇄  Switch map" Height="30" Margin="0,0,0,10"
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                HorizontalContentAlignment="Left" Padding="14,4" ToolTip="{DynamicResource TipMapSwitch}"/>
         <Button Name="BtnExport" Content="↗  Export to file" Height="34" Margin="0,0,0,6"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
                 HorizontalContentAlignment="Left" Padding="14,4" ToolTipService.ShowOnDisabled="True"/>
@@ -1456,7 +1459,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMap','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgMapPreview','BtnMapSwitch','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -2283,6 +2286,201 @@ function Commit-RowEdit {
 
 # v5.17.22: галочка/крестик удалены (юзер) - сохранение на Enter и клик в любое
 # место панели (см. EditingNow-ветки и window Preview-хендлер), откат не нужен
+
+# ---------- v5.17.23 (#13): переключение карт ----------
+$script:MapsDir = "F:\Harry Potter and the Chamber of Secrets\Maps"
+$script:ThumbsDir = "F:\Harry Potter and the Chamber of Secrets\system\Thumbnails"
+# понятные названия (ru); без словаря - сырое имя карты
+$script:MapNames = @{
+    AOLDemo = "Демо-арена"; Adv10Hermione_Extended = "Спасение Гермионы (расшир.)"
+    Adv11aCorridor = "Тайный коридор"; Adv11bSecrets = "Комната секретов"
+    Adv12Chamber = "Тайная комната"; Adv1Willow = "Битва у вербы"
+    Adv3DungeonQuest = "Побег из подземелья"; Adv4Greenhouse = "Оранжерея"
+    Adv6Goyle = "Драка с Гойлом"; Adv7SlythComRoom = "Гостиная Слизерина"
+    Adv8Forest = "Запретный лес"; Adv9Aragog = "Арагог"
+    Arena = "Арена"; BeanRewardRoom = "Комната фасолек"
+    Ch1Rictusempra = "Риктусемпра"; Ch2Skurge = "Скурдж"
+    Ch3Diffindo = "Диффиндо"; Ch4Spongify = "Спонджифай"
+    Ch6WizardCard = "Карта волшебника"; Ch7Gryffindor = "Гриффиндор"
+    Credits = "Титры"; Entry = "Вход"
+    Entryhall_hub = "Входной зал"; FlyingFordCutscene = "Летающий Форд (катсцена)"
+    Grandstaircase_hub = "Гранд-лестница"; GreatHall_G = "Большой зал (Г)"
+    GreatHall_S = "Большой зал (С)"; Grounds_Night = "Двор ночью"
+    Grounds_hub = "Двор Хогвартса"; HPDemo = "Демо-игра"
+    Library = "Библиотека"; Library_Night = "Библиотека ночью"
+    PrivetDr = "Тисовая улица"; Quidditch = "Квиддич"
+    Quidditch_Intro = "Квиддич (интро)"; Quidditch_Match = "Квиддич (матч)"
+    Sepia_Hallway = "Коридор (сепия)"; Transition = "Переход"
+    Duel01 = "Дуэль 1"; Duel02 = "Дуэль 2"; Duel03 = "Дуэль 3"; Duel04 = "Дуэль 4"
+    Duel05 = "Дуэль 5"; Duel06 = "Дуэль 6"; Duel07 = "Дуэль 7"; Duel08 = "Дуэль 8"
+    Duel09 = "Дуэль 9"; Duel10 = "Дуэль 10"; startup = "Стартовая сцена"
+}
+function Get-MapFriendlyName([string]$map) {
+    $ru = $script:MapNames[$map]
+    if ( $ru -ne $null -and $ru -ne "" ) { return $ru }
+    return $map
+}
+function Build-MapRows {
+    param($listPanel, $allMaps, $filter)
+    $listPanel.Children.Clear()
+    $f = ""
+    if ( $filter -ne $null ) { $f = $filter.Trim().ToLower() }
+    $sorted = @($allMaps | Sort-Object -Property @{ Expression = { if ( $script:FavMaps -contains $_ ) { 0 } else { 1 } } }, @{ Expression = { Get-MapFriendlyName $_ } })
+    foreach ( $m in $sorted ) {
+        try {
+        $fn = Get-MapFriendlyName $m
+        if ( $f -ne "" -and ($fn.ToLower().Contains($f) -eq $false) -and ($m.ToLower().Contains($f) -eq $false) ) { continue }
+        $b = New-Object System.Windows.Controls.Border
+        $b.CornerRadius = [System.Windows.CornerRadius]::new(6)
+        $b.Background = $window.Resources['PanelBrush']
+        $b.BorderBrush = $window.Resources['LineBrush']
+        $b.BorderThickness = [System.Windows.Thickness]::new(1)
+        $b.Margin = [System.Windows.Thickness]::new(0,0,0,6)
+        $b.Cursor = [System.Windows.Input.Cursors]::Hand
+        $b.Tag = $m
+        $g2 = New-Object System.Windows.Controls.Grid
+        $g2.Margin = [System.Windows.Thickness]::new(6)
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(72)}
+        $c2 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}
+        $c3 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
+        $g2.ColumnDefinitions.Add($c1); $g2.ColumnDefinitions.Add($c2); $g2.ColumnDefinitions.Add($c3)
+        $thumb = $script:ThumbsDir + "\" + $m + ".bmp"
+        if ( Test-Path $thumb ) {
+            $img = New-Object System.Windows.Controls.Image
+            $img.Width = 72; $img.Height = 54; $img.Stretch = [System.Windows.Media.Stretch]::Uniform
+            $bi = New-Object System.Windows.Media.Imaging.BitmapImage
+            $bi.BeginInit()
+            $bi.UriSource = New-Object System.Uri($thumb)
+            $bi.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            $bi.EndInit(); $bi.Freeze()
+            $img.Source = $bi
+            [System.Windows.Controls.Grid]::SetColumn($img, 0)
+            $g2.Children.Add($img) | Out-Null
+        } else {
+            $ph = New-Object System.Windows.Controls.TextBlock
+            $ph.Text = "--"
+            $ph.Foreground = $window.Resources['MutedBrush']
+            $ph.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+            $ph.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+            [System.Windows.Controls.Grid]::SetColumn($ph, 0)
+            $g2.Children.Add($ph) | Out-Null
+        }
+        $tb2 = New-Object System.Windows.Controls.TextBlock
+        $tb2.Text = $fn
+        $tb2.FontSize = 13
+        $tb2.Foreground = $window.Resources['TextBrush']
+        $tb2.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+        $tb2.Margin = [System.Windows.Thickness]::new(8,0,0,0)
+        $tb2.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        [System.Windows.Controls.Grid]::SetColumn($tb2, 1)
+        $g2.Children.Add($tb2) | Out-Null
+        $isFav = $script:FavMaps -contains $m
+        $star = New-Object System.Windows.Controls.Button
+        if ( $isFav ) { $star.Content = [string][char]0xE735 } else { $star.Content = [string][char]0xE734 }
+        $star.FontFamily = New-Object System.Windows.Media.FontFamily("Segoe MDL2 Assets")
+        $star.FontSize = 14
+        $star.Width = 30; $star.Height = 30
+        $star.Background = [System.Windows.Media.Brushes]::Transparent
+        $star.BorderThickness = [System.Windows.Thickness]::new(0)
+        $star.Cursor = [System.Windows.Input.Cursors]::Hand
+        if ( $isFav ) { $star.Foreground = [System.Windows.Media.Brushes]::Gold } else { $star.Foreground = $window.Resources['TextBrush'] }
+        $star.ToolTip = $(if ( $script:Lang -eq "ru" ) { "В избранное" } else { "Favorite" })
+        $star.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+        $star.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+        $star.Tag = $m
+        [System.Windows.Controls.Grid]::SetColumn($star, 2)
+        $g2.Children.Add($star) | Out-Null
+        $b.Child = $g2
+        # клик по борду (не по звезде) = выбрать карту
+        $b.Add_MouseLeftButtonUp({
+            param($s2, $e2)
+            try {
+                if ( $e2.OriginalSource -is [System.Windows.Controls.Button] ) { return }
+                $script:MapPicked = [string]$s2.Tag
+                $script:MPWin.Close()
+            } catch { }
+        })
+        $star.Add_Click({
+            param($s3, $e3)
+            try {
+                $m3 = [string]$s3.Tag
+                if ( $script:FavMaps -contains $m3 ) { $script:FavMaps.Remove($m3) }
+                else { [void]$script:FavMaps.Add($m3) }
+                Save-Settings
+                Build-MapRows -listPanel $script:MPList -allMaps $script:MPMaps -filter $script:MPSearch.Text
+            } catch { }
+        })
+        [void]$listPanel.Children.Add($b)
+        } catch { }
+    }
+}
+function Show-MapPicker {
+    try {
+        if ( -not (Test-Path $script:MapsDir) ) { Set-Status "maps folder not found"; return }
+        $maps = @(Get-ChildItem -Path $script:MapsDir -Filter "*.unr" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.BaseName } | Where-Object { $_ -notin @('vssver') } | Sort-Object)
+        if ( $maps.Count -eq 0 ) { Set-Status "no maps found"; return }
+        $L = $script:LocData[$script:Lang]
+
+        $win2 = New-Object System.Windows.Window
+        $win2.Title = "HP2 - " + $(if ( $script:Lang -eq "ru" ) { "Выбор карты" } else { "Choose map" })
+        $win2.Width = 560; $win2.Height = 680
+        $win2.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+        $win2.Background = $window.Resources['PanelBrush']
+        $win2.Topmost = $true   # иначе панель (Topmost) перекрывает пикер
+        $win2.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
+        $win2.Left = $window.Left + 200; $win2.Top = $window.Top + 60
+
+        $root2 = New-Object System.Windows.Controls.Grid
+        $root2.Margin = [System.Windows.Thickness]::new(10)
+        $root2.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::Auto}))
+        $root2.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}))
+
+        $search = New-Object System.Windows.Controls.TextBox
+        $search.FontSize = 13
+        $search.Margin = [System.Windows.Thickness]::new(0,0,0,8)
+        [System.Windows.Controls.Grid]::SetRow($search, 0)
+        $search.Tag = $maps
+        $root2.Children.Add($search) | Out-Null
+
+        $sv = New-Object System.Windows.Controls.ScrollViewer
+        $sv.VerticalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
+        [System.Windows.Controls.Grid]::SetRow($sv, 1)
+        $root2.Children.Add($sv) | Out-Null
+
+        $list = New-Object System.Windows.Controls.StackPanel
+        $sv.Content = $list
+
+        # v5.17.23: script:-переменные ДО Build-MapRows/TextChanged - иначе
+        # $script:MPSearch.Add_TextChanged падал "вызов метода на NULL"
+        $script:MPWin = $win2
+        $script:MPList = $list
+        $script:MPMaps = $maps
+        $script:MPSearch = $search
+        Build-MapRows -listPanel $list -allMaps $maps -filter ""
+        # фильтр по поиску (замыкание - только script:-переменные)
+        $script:MPSearch.Add_TextChanged({
+            try { Build-MapRows -listPanel $script:MPList -allMaps $script:MPMaps -filter $script:MPSearch.Text } catch { }
+        })
+
+        $win2.Content = $root2
+        $win2.ShowDialog() | Out-Null
+
+        if ( $script:MapPicked -eq $null -or $script:MapPicked -eq "" ) { return }
+        $pick = [string]$script:MapPicked
+        $script:MapPicked = ""
+        # предупреждение: путь в игре сбросится (кадры остаются в панели - автосейв)
+        if ( $script:KeyRows.Count -gt 0 ) {
+            $r = [System.Windows.MessageBox]::Show($L.MapWarnQ, $(if ( $script:Lang -eq "ru" ) { "Смена карты" } else { "Switch map" }), 'YesNo', 'Question')
+            if ( $r -ne 'Yes' ) { return }
+        }
+        Set-Status ("switching to " + $pick + "...")
+        $st = Send-GameCommand ("open " + $pick)
+        Set-Status ($st + " | " + $(if ( $script:Lang -eq "ru" ) { "карта " } else { "map " }) + $pick)
+    } catch {
+    }
+}
+$controls['BtnMapSwitch'].Add_Click({ Show-MapPicker })
 $controls['DgKeys'].Add_MouseDoubleClick({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -eq $null ) { return }
@@ -2638,6 +2836,9 @@ $script:LocData = @{
         TipGithub = "Open the GitHub repository"
         TipNoWindow = "can't see the game window"
         TipInMenu = "the game is in the menu - load a map first"
+        MapSwitch = "⇄  Switch map"
+        TipMapSwitch = "Open the map picker"
+        MapWarnQ = "Switch map? The in-game path will be cleared (a backup copy stays in the panel - Import restores it)."
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -2672,6 +2873,9 @@ $script:LocData = @{
         TipGithub = "Открыть репозиторий на GitHub"
         TipNoWindow = "не видно активного окна игры"
         TipInMenu = "игра в меню - сначала загрузи карту"
+        MapSwitch = "⇄  Сменить карту"
+        TipMapSwitch = "Открыть выбор карты"
+        MapWarnQ = "Сменить карту? Путь в игре сбросится (копия кадров осталась в панели - восстановится через Импорт)."
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
@@ -2737,11 +2941,12 @@ foreach ( $mi in @($controls['BtnLang'].ContextMenu.Items) ) {
     })
 }
 
-# ---------- settings: тема + язык переживают перезапуск панели ----------
+# ---------- settings: тема + язык + избранные карты переживают перезапуск ----------
 $script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
+$script:FavMaps = New-Object System.Collections.Generic.List[string]
 function Save-Settings {
     try {
-        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang } |
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps) } |
             ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
 }
@@ -2751,6 +2956,9 @@ try {
     $s = Get-Content $script:SettingsFile -Raw -ErrorAction Stop | ConvertFrom-Json
     if ( $s.theme -eq "light" ) { $script:StartTheme = "light" }
     if ( $s.lang -eq "ru" ) { $script:StartLang = "ru" }
+    if ( $s.favmaps -ne $null ) {
+        foreach ( $fm in @($s.favmaps) ) { if ( $fm -ne $null -and $fm -ne "" ) { [void]$script:FavMaps.Add([string]$fm) } }
+    }
 } catch { }
 Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
