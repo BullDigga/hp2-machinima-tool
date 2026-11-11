@@ -2119,8 +2119,6 @@ $controls['BtnClose'].Add_Click({ $window.Close() })
 # Пуш в игру (FOV/Speed) - по ГАЛОЧКЕ; координаты в игре менять нечем, они локальные
 $script:RowSnapshots = @{}
 $script:EditingNow = $false
-$script:JustCommittedOutside = $false
-$script:NoSelectOnBegin = $false
 
 $controls['DgKeys'].Add_BeginningEdit({
     param($sender, $e)
@@ -2154,8 +2152,13 @@ $controls['DgKeys'].Add_CellEditEnding({
         }
     } catch { }
 })
-# одиночный клик = начало редактирования; двойной внутри редактирования = SelectAll.
-# Preview+handledEventsToo: DataGrid/TextBox глотают часть кликов
+# v5.17.21 (#2 UX, финал): КЛИК ПО РЕДАКТИРУЕМОЙ ЯЧЕЙКЕ (Time/FOV/Speed):
+#   1 клик  = начать правку (каретка в конец, текст НЕ выделен)
+#   2 клик  = выделить весь текст (замена) - ТОЛЬКО если оба клика в одну ячейку
+# Клик по нередактируемым полям (координаты, #) = просто выделение строки.
+# "Проглатывание" первого клика после клика вне таблицы УДАЛЕНО - правка начинается
+# с первого клика всегда. Клик по другой редактируемой ячейке при активной правке =
+# коммит предыдущей + правка новой (два deferred строго по порядку диспетчера)
 $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
     param($s, $e)
     try {
@@ -2175,9 +2178,8 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
             if ( $depB -is [System.Windows.Controls.Button] ) { $btn = $depB; break }
             $depB = [Windows.Media.VisualTreeHelper]::GetParent($depB)
         }
-        # двойной клик в редактируемом TextBox - выделить весь текст
-        # (ВАЖНО: ветка ДО коммита - двойной клик по редактируемой ячейке должен
-        # выделять, а не завершать правку)
+        # двойной клик в редактируемом TextBox - выделить весь текст (замена);
+        # ветка ДО коммита: двойной клик по уже правимой ячейке выделяет, а не коммитит
         if ( $e.ClickCount -ge 2 ) {
             $tb = $null
             $dep2 = $e.OriginalSource
@@ -2189,32 +2191,20 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
         }
         if ( $script:Playing ) { return }
         if ( $btn -ne $null ) { return }
-        # v5.17.20: первый клик по таблице после клика ВНЕ её - аннулируется
-        # (обычный селект строки, правка не начинается); кнопки не глотаются -
-        # глаз/корзина/пилюли работают с первого раза
-        if ( $script:JustCommittedOutside ) {
-            $script:JustCommittedOutside = $false
-            if ( $cell -ne $null ) { $script:NoSelectOnBegin = $true }
-            return
-        }
-        # v5.17.19: если что-то редактируется, клик по таблице = коммит правки
-        # (CommitEdit false = СОХРАНИТЬ; true ОТМЕНЯЛ бы правку - баг v5.17.19).
-        # Без этого выделенный текст оставался при клике на пустую часть таблицы
-        # (DataGrid сам коммитит только при переходе фокуса)
+        # клик по УЖЕ редактируемой ячейке - не трогаем (позиция каретки в TextBox,
+        # выделение мышью); коммита нет, правка продолжается
+        if ( $cell -ne $null -and $cell.IsEditing ) { return }
+        # активная правка + клик по ДРУГОЙ ячейке или свободному месту = коммит
+        # предыдущей; правка новой (если ячейка редактируемая) - следующим deferred
+        $commitPending = $false
         if ( $script:EditingNow ) {
             $script:EditingNow = $false
-            # v5.17.20.1: свободное место таблицы = как клик вне таблицы: следующий
-            # клик тоже не начинает правку сразу (иначе FOV -> пустое место -> Speed
-            # другой строки сразу выделял бы значение)
-            $script:JustCommittedOutside = $true
+            $commitPending = $true
             $window.Dispatcher.BeginInvoke([Action]{
                 try { Commit-RowEdit } catch { }
             }) | Out-Null
-            return
         }
-        if ( $cell -eq $null -or $cell.IsEditing -or $cell.IsReadOnly ) {
-            return
-        }
+        if ( $cell -eq $null -or $cell.IsReadOnly ) { return }
         if ( [string]$cell.Column.Header -eq "#" ) { return }
         # строка-контейнер для BeginEdit(unit, row)
         $drow = $null
@@ -2225,41 +2215,34 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
         }
         # ВАЖНО: [Action]-замыкание выполняется ПОЗЖЕ на диспетчере - локальные
         # переменные хендлера там НЕ ВИДНЫ (динамический скоуп PS) - только script:!
-        # CurrentCell = кликнутая ячейка; BeginEdit() без аргументов редактирует её
+        # CurrentCell = кликнутая ячейка; BeginEdit() без аргументов редактирует её.
+        # Один клик = правка БЕЗ выделения текста (каретка в конец); SelectAll -
+        # только по двойному клику (см. ветку выше)
         $script:EditCell = $cell
         $script:EditRowC = $drow
-        $script:NoSelectThis = $script:NoSelectOnBegin
-        $script:NoSelectOnBegin = $false
         $window.Dispatcher.BeginInvoke([Action]{
             try {
                 $dgv = $controls['DgKeys']
                 $dgv.CurrentCell = New-Object System.Windows.Controls.DataGridCellInfo($script:EditCell)
                 $dgv.BeginEdit()
                 $script:EditingNow = $true
-                # v5.17.19: показать галочку/крестик в редактируемой строке
+                # показать галочку/крестик в редактируемой строке
                 Show-RowEditActions
-                # v5.17.20: правка после "аннулированного" клика - без выделения
-                # всего текста (каретка в конец); обычная правка выделяет как раньше
-                if ( $script:NoSelectThis ) {
-                    $tb = Find-VisualChildOfType $script:EditCell ([System.Windows.Controls.TextBox])
-                    if ( $tb -ne $null ) {
-                        $tb.SelectionLength = 0
-                        $tb.CaretIndex = $tb.Text.Length
-                    }
+                # каретка в конец, текст не выделен - выделение только по двойному клику
+                $tb = Find-VisualChildOfType $script:EditCell ([System.Windows.Controls.TextBox])
+                if ( $tb -ne $null ) {
+                    $tb.SelectionLength = 0
+                    $tb.CaretIndex = $tb.Text.Length
                 }
-                $script:NoSelectThis = $false
-            } catch {
-                try { [IO.File]::AppendAllText((Join-Path $PSScriptRoot "markers.log"), ("[" + (Get-Date -Format HH:mm:ss) + "] beginEdit FAIL: " + $_.Exception.Message + "`r`n")) } catch { }
-            }
+            } catch { }
         }) | Out-Null
     } catch { }
 }
 $controls['DgKeys'].AddHandler([System.Windows.UIElement]::PreviewMouseLeftButtonDownEvent, $dgKeysEditHandler, $true)
 
 # v5.17.20: клик ВНЕ таблицы (MAP, пустые места, другие кнопки) при активной правке
-# = СОХРАНИТЬ правку и взвести флаг: первый клик по таблице после этого
-# "аннулируется" (не начинает правку сразу - юзер просил). TextBlock'и не забирают
-# фокус, поэтому DataGrid сам такие клики не коммитил - выделение висело
+# = СОХРАНИТЬ правку. TextBlock'и не забирают фокус, поэтому DataGrid сам такие
+# клики не коммитил - выделение висело
 $window.Add_PreviewMouseLeftButtonDown({
     param($s, $e)
     try {
@@ -2270,7 +2253,6 @@ $window.Add_PreviewMouseLeftButtonDown({
             $dep = [Windows.Media.VisualTreeHelper]::GetParent($dep)
         }
         $script:EditingNow = $false
-        $script:JustCommittedOutside = $true
         $window.Dispatcher.BeginInvoke([Action]{
             try { Commit-RowEdit } catch { }
         }) | Out-Null
