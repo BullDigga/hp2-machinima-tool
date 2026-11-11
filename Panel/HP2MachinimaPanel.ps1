@@ -2194,14 +2194,19 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
         # клик по УЖЕ редактируемой ячейке - не трогаем (позиция каретки в TextBox,
         # выделение мышью); коммита нет, правка продолжается
         if ( $cell -ne $null -and $cell.IsEditing ) { return }
-        # активная правка + клик по ДРУГОЙ ячейке = коммит берёт на себя DataGrid
-        # (нативно, при смене ячейки); Commit-RowEdit здесь НЕ нужен - его
-        # BtnRefresh-фокус ломал последующий BeginEdit. Свободное место - ниже
+        # v5.17.21.3: активная правка + клик мимо неё = «выметание» фокусом: переносим
+        # фокус на внешнюю кнопку, DataGrid САМ завершает правку (нативный путь, без
+        # застревания). Иначе старая ячейка оставалась с TextBox (белый фон) - на
+        # скрине юзера: FOV row1/row3 оставались белыми после переключения правки
         if ( $script:EditingNow ) {
+            try { $null = [System.Windows.Input.Keyboard]::Focus($controls['BtnRefresh']) } catch { }
             $script:EditingNow = $false
             if ( $cell -eq $null ) {
                 $window.Dispatcher.BeginInvoke([Action]{
-                    try { Commit-RowEdit } catch { }
+                    try {
+                        try { $null = [System.Windows.Input.Keyboard]::Focus($controls['BtnRefresh']) } catch { }
+                        $controls['DgKeys'].CommitEdit()
+                    } catch { }
                 }) | Out-Null
                 return
             }
