@@ -1274,7 +1274,7 @@ function Send-PathSaveAndSync([string]$prefix) {
                 <Button x:Name="PillBtn" Content="+" Tag="{Binding Num}" FontSize="10" FontWeight="Bold"
                         Width="16" Height="12" Padding="0" BorderThickness="0" Cursor="Hand"
                         Background="#E02F9E44" Foreground="White" HorizontalAlignment="Left" VerticalAlignment="Top"
-                        Margin="22,-6,0,0" ToolTip="{DynamicResource TipInsertRow}"
+                        Margin="4,-6,0,0" ToolTip="{DynamicResource TipInsertRow}"
                         Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource BoolToVis}}"/>
                 <!-- у строки 0 глиф "+" рисует АДОРНЕР (верхняя половина пилюли лежит НА
                      шапке, кнопка клипуется вьюпортом) - глушим глиф кнопки, Content="+"
@@ -1289,29 +1289,29 @@ function Send-PathSaveAndSync([string]$prefix) {
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>
         <DataGridTextColumn Header="Time" Width="56" Binding="{Binding Time}"/>
-        <DataGridTextColumn Header="X" Width="56" Binding="{Binding X, StringFormat=F1}"/>
-        <DataGridTextColumn Header="Y" Width="56" Binding="{Binding Y, StringFormat=F1}"/>
-        <DataGridTextColumn Header="Z" Width="56" Binding="{Binding Z, StringFormat=F1}"/>
-        <DataGridTextColumn Header="Yaw" Width="48" Binding="{Binding Yaw}"/>
-        <DataGridTextColumn Header="Pitch" Width="44" Binding="{Binding Pitch}"/>
+        <DataGridTextColumn Header="X" Width="56" Binding="{Binding X, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Y" Width="56" Binding="{Binding Y, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Z" Width="56" Binding="{Binding Z, StringFormat=F1}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Yaw" Width="48" Binding="{Binding Yaw}" IsReadOnly="True"/>
+        <DataGridTextColumn Header="Pitch" Width="44" Binding="{Binding Pitch}" IsReadOnly="True"/>
         <DataGridTextColumn Header="FOV" Width="36" Binding="{Binding FOV}"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
         <DataGridTemplateColumn Width="44">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
-              <!-- v5.17.18 (#2): галочка/крестик строки - подтвердить/отменить правки
-                   значений строки (появляются при наведении, как корзина и глаз).
-                   Глифы MDL2: E73E CheckMark / E711 Cancel; роутер delHandler по [char] -->
+              <!-- v5.17.19 (#2): галочка/крестик ТОЛЬКО пока строка редактируется:
+                   строка помечается EditingRowTag (см. BeginEdit/CellEditEnding-хуки);
+                   вне правки колонка пустая -->
               <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
-                          Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}">
+                          x:Name="EditActions"
+                          Tag="{Binding Num}"
+                          Visibility="Collapsed">
                 <Button Content="&#xE73E;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
                         Background="Transparent" Foreground="#2F9E44" Padding="2,0" Margin="0,0,2,0"
-                        ToolTip="{DynamicResource TipAcceptRow}"
-                        Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+                        ToolTip="{DynamicResource TipAcceptRow}"/>
                 <Button Content="&#xE711;" FontFamily="Segoe MDL2 Assets" Tag="{Binding Num}" FontSize="13" Cursor="Hand" BorderThickness="0"
                         Background="Transparent" Foreground="#E5484D" Padding="2,0"
-                        ToolTip="{DynamicResource TipCancelRow}"
-                        Visibility="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=DataGridRow}, Converter={StaticResource BoolToVis}}"/>
+                        ToolTip="{DynamicResource TipCancelRow}"/>
               </StackPanel>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
@@ -1837,7 +1837,7 @@ function Update-PillAdorner {
             # (включая Margin грида), поэтому TranslatePoint именно к слою - иначе
             # эллипс уезжает на 12 WPF (маргин) вверх-влево
             $p = $row0.TranslatePoint([System.Windows.Point]::new(0,0), $script:PillAdorner.Parent)
-            $script:PillAX = $p.X + 30   # центр пилюли: Margin 22 слева + половина ширины 16
+            $script:PillAX = $p.X + 12   # центр пилюли: Margin 4 слева + половина ширины 16
             $script:PillAY = $p.Y        # верх строки 0 = стык с шапкой
         }
         if ( $script:PillAX -gt 0 -and $dg.Items.Count -gt 0 -and $dg.IsMouseOver ) {
@@ -2118,6 +2118,7 @@ $controls['BtnClose'].Add_Click({ $window.Close() })
 # клик мимо таблицы сохраняет правки в поля (DataGrid коммитит сам при потере фокуса).
 # Пуш в игру (FOV/Speed) - по ГАЛОЧКЕ; координаты в игре менять нечем, они локальные
 $script:RowSnapshots = @{}
+$script:EditingNow = $false
 
 $controls['DgKeys'].Add_BeginningEdit({
     param($sender, $e)
@@ -2165,6 +2166,20 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
             if ( $dep -is [System.Windows.Controls.DataGridCell] ) { $cell = $dep; break }
             $dep = [Windows.Media.VisualTreeHelper]::GetParent($dep)
         }
+        # v5.17.19: если что-то редактируется, ЛЮБОЙ клик по таблице = коммит правки.
+        # Без этого выделенный текст оставался при клике на пустую часть таблицы
+        # (DataGrid сам коммитит только при переходе фокуса), а отложенный BeginEdit
+        # тут же стартовал новую правку - выделение висело вечно
+        if ( $script:EditingNow ) {
+            $script:EditCell = $null
+            $window.Dispatcher.BeginInvoke([Action]{
+                try {
+                    $dgv = $controls['DgKeys']
+                    if ( $script:EditingNow ) { $dgv.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) }
+                } catch { }
+            }) | Out-Null
+            return
+        }
         # двойной клик в редактируемом TextBox - выделить весь текст
         if ( $e.ClickCount -ge 2 ) {
             $tb = $null
@@ -2191,14 +2206,16 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
         # переменные хендлера там НЕ ВИДНЫ (динамический скоуп PS) - только script:!
         # CurrentCell = кликнутая ячейка; BeginEdit() без аргументов редактирует её
         $script:EditCell = $cell
+        $script:EditRowC = $drow
         $window.Dispatcher.BeginInvoke([Action]{
             try {
                 $dgv = $controls['DgKeys']
                 $dgv.CurrentCell = New-Object System.Windows.Controls.DataGridCellInfo($script:EditCell)
                 $dgv.BeginEdit()
-            } catch {
-                try { [IO.File]::AppendAllText((Join-Path $PSScriptRoot "markers.log"), ("[" + (Get-Date -Format HH:mm:ss) + "] beginEdit FAIL: " + $_.Exception.Message + "`r`n")) } catch { }
-            }
+                $script:EditingNow = $true
+                # v5.17.19: показать галочку/крестик в редактируемой строке
+                Show-RowEditActions
+            } catch { }
         }) | Out-Null
     } catch { }
 }
@@ -2245,6 +2262,65 @@ function Revert-RowEdits([int]$n) {
         Set-Status "row $n edits reverted"
     } catch { }
 }
+
+# v5.17.19: галочка/крестик видны ТОЛЬКО в редактируемой строке.
+# Поиск EditActions-панели идёт по визуальному дереву СТРОКИ (Tag = Num строки,
+# имя панели фиксированное). Вызов - после BeginEdit и после коммита/отмены.
+function Set-RowEditActionsVisible([System.Windows.Controls.DataGridRow]$row, [bool]$vis) {
+    try {
+        if ( $row -eq $null ) { return }
+        $sp = Find-VisualChildByNameIn $row "EditActions"
+        if ( $sp -ne $null ) {
+            if ( $vis ) { $sp.Visibility = [System.Windows.Visibility]::Visible }
+            else { $sp.Visibility = [System.Windows.Visibility]::Collapsed }
+        }
+    } catch { }
+}
+# PS 5.1: нет тернарника
+function Find-VisualChildByNameIn($parent, $name) {
+    if ( $parent -eq $null ) { return $null }
+    $n = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($parent)
+    for ( $i = 0; $i -lt $n; $i++ ) {
+        $c = [System.Windows.Media.VisualTreeHelper]::GetChild($parent, $i)
+        if ( $c -is [System.Windows.FrameworkElement] -and $c.Name -eq $name ) { return $c }
+        $r = Find-VisualChildByNameIn $c $name
+        if ( $r -ne $null ) { return $r }
+    }
+    return $null
+}
+function Show-RowEditActions {
+    try {
+        # спрятать у всех строк, показать у редактируемой (CurrentCell)
+        $dg = $controls['DgKeys']
+        $curRow = $null
+        try { $curRow = $dg.ItemContainerGenerator.ContainerFromIndex($dg.SelectedIndex) } catch { }
+        for ( $i = 0; $i -lt $dg.Items.Count; $i++ ) {
+            $r = $null
+            try { $r = $dg.ItemContainerGenerator.ContainerFromIndex($i) } catch { }
+            if ( $r -ne $null ) { Set-RowEditActionsVisible $r ($r -eq $curRow) }
+        }
+    } catch { }
+}
+function Hide-RowEditActions {
+    try {
+        $dg = $controls['DgKeys']
+        for ( $i = 0; $i -lt $dg.Items.Count; $i++ ) {
+            $r = $null
+            try { $r = $dg.ItemContainerGenerator.ContainerFromIndex($i) } catch { }
+            if ( $r -ne $null ) { Set-RowEditActionsVisible $r $false }
+        }
+    } catch { }
+}
+# коммит/отмена ячейки (клик мимо, Enter, Esc) - прячем галочку/крестик
+$controls['DgKeys'].Add_CellEditEnding({
+    param($sender, $e)
+    try {
+        $script:EditingNow = $false
+        $window.Dispatcher.BeginInvoke([Action]{
+            try { Hide-RowEditActions } catch { }
+        }) | Out-Null
+    } catch { }
+})
 $controls['DgKeys'].Add_MouseDoubleClick({
     $sel = $controls['DgKeys'].SelectedItem
     if ( $sel -eq $null ) { return }
@@ -2352,7 +2428,7 @@ $controls['TbStatus'].Add_MouseEnter({
     } catch { }
 })
 $script:LogCloseTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:LogCloseTimer.Interval = [TimeSpan]::FromMilliseconds(350)
+$script:LogCloseTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 $script:LogCloseTimer.Add_Tick({
     $script:LogCloseTimer.Stop()
     try {
