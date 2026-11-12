@@ -1253,15 +1253,17 @@ function Find-LogFile {
 
 function Sync-AfterCommand([string]$status) {
     # событие пишется в лог сразу после Enter - короткая пауза на всякий случай.
-    # v5.17: перед синком запрашиваем у игры СНАПШОТ пути (PathDumpKeys): таблица
-    # строится из дампа, а не из уцелевших обрывков кольцевого лог-буфера.
     # v5.16.2 делала синк ПОСЛЕ команды ВСЕГДА полным ("событие в хвосте буфера") -
     # полный скан занимает 10-20с и каждая команда (F8!) висела в typing минуту.
     # v5.17.30.1: быстрый скан ЛОВИТ новые события на стабильном буфере (фильтр
     # newMax теперь учитывает gen), а буфер переезжает только при загрузке карты -
     # это покрывают полл-форс (~54с) и отложенный полный рескан ниже (10с)
-    Wait-Pump 120
-    Send-GameCommands @("PathDumpKeys") | Out-Null
+    # v5.17.30.5: УБРАН зонд PathDumpKeys после каждой команды (юзер: "F8 зависает
+    # на несколько секунд - пишет в терминал"). Это была ВТОРАЯ пачка печати с
+    # собственным тройным открытием консоли (+1.05с) и печатью (+0.8с) - F8 стоил
+    # ~2с только на зонд. ADD-событие свежее в буфере - быстрый скан ловит его
+    # сразу; дамп-зонд остаётся там, где нужен без печати: старт панели, полл при
+    # пустой карте, кнопка ⟳
     Wait-Pump 120
     $tries = 0
     while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
@@ -1943,11 +1945,18 @@ function Test-WrongMap {
 function Do-PathAdd {
     if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
     # скорость кадра = поле fly speed: применяем её перед добавлением
+    # v5.17.30.5: Cam_MoveSpeed печатается ТОЛЬКО если скорость изменилась
+    # (повторные F8 на той же скорости - минус одна команда и ~0.6с печати;
+    # юзер: "F8 зависает на несколько секунд"). Скорость глобальная - не сбрасывается
     $sp = $controls['TbSpeed'].Text.Trim()
     if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
     $script:StampNextSync = $true   # новый кадр получит время постановки
-    $st = Send-GameCommands @("Cam_MoveSpeed $sp", "PathAdd")
-    $script:SpeedApplied = $sp
+    if ( $script:SpeedApplied -eq $sp ) {
+        $st = Send-GameCommands @("PathAdd")
+    } else {
+        $st = Send-GameCommands @("Cam_MoveSpeed $sp", "PathAdd")
+        $script:SpeedApplied = $sp
+    }
     Update-ParamBox "speed"
     Sync-AfterCommand $st
 }
