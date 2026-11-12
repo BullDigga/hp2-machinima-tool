@@ -612,6 +612,8 @@ $script:CurrentMap = ""   # карта, где игра СЕЙЧАС (из MAP-�
 # v5.17.30: подкнопка "вернуться к кадрам" - флаги перехода и прибытия
 $script:KeyMapGoClicked = $false
 $script:KeyMapGoArrived = $false
+# v5.17.30.5: CLEAR виделся в буфере игры за сессию панели (явная очистка юзером)
+$script:SawClearInBuffer = $false
 $script:KeyMap = ""       # v5.14: карта, которой принадлежат кадры в таблице
 $script:LastGen = -1      # v5.16: поколение лога (меняется на каждой загрузке уровня)
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
@@ -1009,9 +1011,12 @@ function Complete-SyncFromLogInner {
         # лога, реплей "всей истории" даёт фантомов и неверные индексы при DEL.
         $inDump = $false
         $dumpRows = New-Object System.Collections.ArrayList
+        # v5.17.30.5: CLEAR в буфере = ЯВНАЯ очистка (краш/перезапуск игры её не пишет).
+        # Сессионный флаг: старт-рестор бэкапа тоже не должен возвращать очищенное
+        $hadClear = $false
         foreach ( $e in $ev ) {
             switch ( $e.T ) {
-                'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = ""; $script:KeyMapGoClicked = $false }
+                'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = ""; $script:KeyMapGoClicked = $false; $hadClear = $true; $script:SawClearInBuffer = $true }
                 'DEL'   {
                     $i = [int]$e.D
                     if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) }
@@ -1180,7 +1185,12 @@ function Complete-SyncFromLogInner {
         # флагом UserClearPending (гасится после этого синка). ДРУГАЯ карта (v5.17.30) -
         # кадры тоже сохраняем и показываем: лок кнопок защищает их от порчи,
         # подкнопка на карточке предлагает вернуться на карту кадров
-        if ( $rows.Count -eq 0 -and $script:KeyRows.Count -gt 0 -and -not $script:UserClearPending ) {
+        # v5.17.30.5: -not $hadClear - CLEAR в буфере = юзер явно очистил путь
+        # (в т.ч. F11 хоткеем, который не ставит UserClearPending): кадры НЕ
+        # восстанавливать. Краш/перезапуск игры CLEAR не пишет - там восстановление
+        # остаётся. Живой случай: F11 очистил путь (CLEAR seq 46 в буфере), панель
+        # вернула кадры обратно - юзер: "нажал очистку - ничего не произошло"
+        if ( $rows.Count -eq 0 -and $script:KeyRows.Count -gt 0 -and -not $script:UserClearPending -and -not $hadClear ) {
             if ( $prevKeyMap -ne "" -and $prevKeyMap -eq $script:CurrentMap ) {
                 $rows = $script:KeyRows
                 $script:KeyMap = $prevKeyMap
@@ -3370,7 +3380,13 @@ $window.Add_Loaded({
                 3 { $window.Dispatcher.BeginInvoke([Action]{ $st = Send-GameCommand "PathStop"; Set-Playing $false; Set-Status $st }) | Out-Null }
                 4 {
                     # F11 = PathClear + сброс ini + таблица
+                    # v5.17.30.5: ЯВНАЯ очистка - как кнопка корзины, должна ставить
+                    # UserClearPending, иначе правило "путь пуст + кадры в панели"
+                    # ВОССТАНАВЛИВАЛО кадры сразу после их удаления (юзер: "нажал
+                    # очистку - ничего не произошло": в игре путь пуст, в таблице
+                    # те же кадры). Живая проверка буфера: CLEAR исполнился игрой
                     $window.Dispatcher.BeginInvoke([Action]{
+                        $script:UserClearPending = $true
                         $st = Send-GameCommand "PathClear"
                         Send-PathSaveAndSync $st
                     }) | Out-Null
@@ -3929,7 +3945,10 @@ if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) {
 }
 # v5.17.17: таблица пуста (игра закрыта/крашнулась) - восстанавливаем кадры из
 # автосейва: в панели они живут, пока пользователь сам их не удалит
-if ( $script:KeyRows.Count -eq 0 ) { Restore-KeysBackup }
+# v5.17.30.5: НО если в буфере игры уже был CLEAR (юзер явно очистил путь, а
+# панель перезапускалась) - восстановление вернуло бы только что удалённые кадры
+# (живой случай: F11 очистил путь, панель показывала кадры снова и снова)
+if ( $script:KeyRows.Count -eq 0 -and -not $script:SawClearInBuffer ) { Restore-KeysBackup }
 
 # v5.17.3: необработанные исключения dispatcher'а -> crash.log (панель молча умирала)
 $window.Dispatcher.add_UnhandledException({
