@@ -274,6 +274,12 @@ public class MemScanPanel {
         for ( int r = 0; r + 1 < pairs.Length; r += 2 ) {
             long regA = pairs[r];
             long regS = pairs[r + 1];
+            // v5.17.30.9d: HEAD-WINDOW - быстрый скан читает только ПЕРВЫЕ 16МБ
+            // региона. Живой замер (Tools/hit-offsets.ps1): все PATHEV-хиты лежат
+            // у начал регионов (макс 8.4МБ из 140МБ) - лог и его копии в куче
+            // группируются у head, хвост региона - чужие данные. Скан 2.1с -> ~0.3с.
+            // Рост буфера за 16МБ ловится полным ресканом (~3.6мин) и авто-форсом
+            if ( regS > 0x1000000 ) { regS = 0x1000000; }
             var seen = new System.Collections.Generic.HashSet<long>();
             var seenL = new System.Collections.Generic.HashSet<long>();
             long pos = 0;
@@ -481,9 +487,11 @@ function Confirm-GameActive {
     } catch { return $false }
 }
 
-function Send-GameCommands([string[]]$cmds) {
+function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
     # v5.17.6: защита от повторного клика во время печати + Pump-Dispatcher
     # прокачивает отрисовку - спиннер крутится СРАЗУ и НЕ ЗАМИРАЕТ на весь ввод
+    # v5.17.30.9d: -SkipOpen - досылка закрытия (PathPing потерялся => консоль
+    # ЕЩЁ ОТКРЫТА, ensure-open не нужен: экономия 0.6с на повторе)
     if ( $script:SendBusy ) {
         # v5.17.30.1: отказ был НЕВИДИМ - статус "typing..." оставался висеть, юзер
         # жаловался "кадр не добавляется". Показываем warn прямо в статус
@@ -528,25 +536,21 @@ function Send-GameCommands([string[]]$cmds) {
         if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
         # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
         # Обычный ` остаётся терминалом пользователя.
-        # v5.17.30.4: ЖИВОЙ ФАКТ - ПЕРВАЯ команда пачки печаталась в ещё закрытую
-        # консоль и уходила в геймплей (буфер: 4x PathClear потеряно при дошедших
-        # финальных PathPing; open карт - та же история: "перестал грузить карты").
-        # Паузы 450/1200мс НЕ помогли => лаг открытия нестабилен. Надёжное решение:
-        # ТРОЙНОЙ ensure-open. Ветка Shift+` в HPConsole ИДЕМПОТЕНТНА (повтор при
-        # уже открытой консоли ничего не закрывает - только LaunchUWindow/ShowConsole
-        # снова) - три тапа с паузами гарантируют открытие независимо от лагов
+        # v5.17.30.9c: КОРЕНЬ "потерянных первых команд" и "мусорных символов"
+        # найден живым скриншотом терминала: строки 'Q~PathClear', '~~\~~PathPing'
+        # = grave-тап ПРОХОДИЛ БЕЗ Shift (движок не успел обработать Shift-Press:
+        # пауза Shift->grave была 40мс < игрового тика) => срабатывала ЮЗЕРОВА ветка:
+        # toggle закрыл/открыл консоль, а символ ` попадал в строку ввода перед
+        # командой => 'Unrecognized command'. ТРОЙНОЙ тап усугублял хаос (три toggle).
+        # Новый надёжный профиль: Shift down -> 300мс (движок обязан обработать
+        # Shift-Press за 18 тиков) -> grave -> Shift up -> 200мс. ОДИН тап вместо
+        # трёх: быстрее (0.65с вместо 1.05с) и без toggle-хаоса
         [GameCtl]::KeyDown([uint16]0x10)
+        Wait-Pump 250
         [GameCtl]::Tap([uint16]$VK['grave'])
+        Wait-Pump 150
         [GameCtl]::KeyUp([uint16]0x10)
-        Wait-Pump 350
-        [GameCtl]::KeyDown([uint16]0x10)
-        [GameCtl]::Tap([uint16]$VK['grave'])
-        [GameCtl]::KeyUp([uint16]0x10)
-        Wait-Pump 350
-        [GameCtl]::KeyDown([uint16]0x10)
-        [GameCtl]::Tap([uint16]$VK['grave'])
-        [GameCtl]::KeyUp([uint16]0x10)
-        Wait-Pump 350
+        Wait-Pump 120
         # v5.17.8: прогресс [i/N] с бегущими точками + проверка фокуса ПЕРЕД КАЖДОЙ командой.
         # Alt-Tab во время пачки (импорт) печатал остаток команд в ЧУЖОЕ окно, а консоль игры
         # оставалась открытой (чёрный экран). Теперь: фокус потерян -> один тихий рефокус,
@@ -592,6 +596,11 @@ function Send-GameCommands([string[]]$cmds) {
         Type-Command "PathPing"
         [GameCtl]::Tap([uint16]$VK['enter'])
         Wait-Pump 260
+        # v5.17.30.9: grave-финал ОТМЕНЁН - живой тест показал: после PathPing
+        # (HideConsole -> bShowConsole=false) grave проходит ветку "открыть" и
+        # ОТКРЫВАЕТ терминал ВИДИМО в углу (10,10) - юзер видел открытое окно
+        # команды. PathPing-закрытие (HideConsole + CloseUWindow x2, см. патч
+        # HPConsole 15:53/15:58) остаётся единственным финалом
         Wait-Pump 80
         # одиночные команды без последующего синка: гасим спиннер сами (синк делает это раньше, если запущен)
         $script:SpinStopTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -643,6 +652,9 @@ $script:KeyMapGoClicked = $false
 $script:KeyMapGoArrived = $false
 # v5.17.30.5: CLEAR виделся в буфере игры за сессию панели (явная очистка юзером)
 $script:SawClearInBuffer = $false
+# v5.17.30.9: число PING-событий в последнем распарсенном скане - детекция потери
+# закрывающего PathPing (если после команды PING не пришёл - консоль не закрылась)
+$script:LastSyncPingCount = 0
 $script:KeyMap = ""       # v5.14: карта, которой принадлежат кадры в таблице
 $script:LastGen = -1      # v5.16: поколение лога (меняется на каждой загрузке уровня)
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
@@ -1034,6 +1046,15 @@ function Complete-SyncFromLogInner {
         } elseif ( $mx -gt $script:ScanCache.LastSeq ) {
             $script:ScanCache.LastSeq = $mx
         }
+        # v5.17.30.9c: персистентный кэш областей (после ПОЛНОГО скана): рестарт
+        # панели при работающей игре стартует БЕЗ 16-24с полного скана (Add_Loaded
+        # подхватывает области, если PID игры совпал)
+        if ( -not $script:LastScanFast -and $script:ScanCache.Regions.Count -ge 2 ) {
+            try {
+                @{ pid = $gp.Id; regions = @($script:ScanCache.Regions) } |
+                    ConvertTo-Json -Compress | Set-Content -Path (Join-Path $PSScriptRoot "scan-cache.json") -Encoding UTF8
+            } catch { }
+        }
         $isNum = '^-?\d+(\.\d+)?$'
         # v5.17: DUMP-блок (PathDumpKeys) = снапшот истинного состояния пути от игры.
         # Лог-буфер в памяти КОЛЬЦЕВОЙ: старые ADD-события вытесняются новыми строками
@@ -1158,6 +1179,10 @@ function Complete-SyncFromLogInner {
                 }
             }
         }
+        # v5.17.30.9: PING-счётчик скана - Sync-AfterCommand по нему видит, дошёл ли
+        # закрывающий PathPing пачки (не дошёл - консоль осталась открытой, досылаем)
+        $script:LastSyncPingCount = 0
+        foreach ( $ep in $ev ) { if ( $ep.T -eq 'PING' ) { $script:LastSyncPingCount++ } }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
 
         # время постановки кадра: штампуем только НОВЫЕ координаты (после F8/вставки);
@@ -1309,16 +1334,51 @@ function Sync-AfterCommand([string]$status) {
     # ~2с только на зонд. ADD-событие свежее в буфере - быстрый скан ловит его
     # сразу; дамп-зонд остаётся там, где нужен без печати: старт панели, полл при
     # пустой карте, кнопка ⟳
+    # v5.17.30.9d: статус "syncing table..." СРАЗУ после пачки - раньше статус
+    # висел "typing 1 cmd(s): PathPing" все 2-3с синка (юзер: "статус, будто
+    # команда ещё вводится")
+    Set-Status "syncing table..." 
     Wait-Pump 120
+    # v5.17.30.9: ПРОВЕРКА ДОСТАВКИ закрытия. Пачка заканчивается PathPing (он
+    # закрывает консоль и логирует PING). Если в скане после пачки PING-ов не
+    # прибавилось - закрывающая команда потерялась (тик игры), консоль ОСТАЛАСЬ
+    # ОТКРЫТОЙ (юзер: палочка-курсор, WASD в консоль). Досываем PathPing повторно
+    # v5.17.30.9d: ЖИВОЙ ФАКТ - PING бывает ПОЗДНИМ (игра пишет его в лог с лагом
+    # тика), а не потерянным: слепая досылка открывала консоль ЗАНОВО после уже
+    # закрытой (+2с "typing PathPing" в статусе). Новый порядок: 1) подождать 400мс
+    # и пересканировать (поздний PING доезжает); 2) досылка ТОЛЬКО если PING не
+    # появился и после ожидания; 3) досылка БЕЗ ensure-open (PathPing потерян =>
+    # консоль ещё открыта) - минус 0.6с
+    $pingBefore = $script:LastSyncPingCount
     $tries = 0
     while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
         Wait-Pump 300
         $tries++
     }
-    $tFs = New-Object System.Windows.Threading.DispatcherTimer
-    $tFs.Interval = [TimeSpan]::FromSeconds(10)
-    $tFs.Add_Tick({ param($s, $e) $s.Stop(); Sync-FromLog -Force })
-    $tFs.Start()
+    if ( $script:LastSyncPingCount -le $pingBefore ) {
+        Wait-Pump 400
+        $tries = 0
+        while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
+            Wait-Pump 300
+            $tries++
+        }
+    }
+    if ( $script:LastSyncPingCount -le $pingBefore ) {
+        Send-GameCommands @("PathPing") -SkipOpen | Out-Null
+        Wait-Pump 120
+        $tries = 0
+        while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
+            Wait-Pump 300
+            $tries++
+        }
+        if ( $script:LastSyncPingCount -le $pingBefore ) {
+            Set-Status "console may still be open - press grave ( `` ) once to close it" "warn"
+        }
+    }
+    # v5.17.30.9e: отложенный полный рескан (10с после команды) УДАЛЁН - он гонял
+    # 20-секундный полный скан ПОСЛЕ КАЖДОГО F8 (юзер: "таблица обновляется 5+с",
+    # статус full scan 20415ms). Переезд буфера ловят: полл-форс (~3.6мин),
+    # авто-форс на пустом быстром скане, ресканы Switch-ToMap (12/26с после open)
     if ( $status -ne "" ) { Set-Status $status }
 }
 
@@ -3395,6 +3455,32 @@ $controls['DgKeys'].Add_MouseDoubleClick({
 # ---------- global hotkeys ----------
 
 $window.Add_Loaded({
+    # v5.17.30.9c: стартовый синк ПЕРЕНЕСЁН сюда (после показа окна). Раньше полный
+    # скан памяти (16-24с) шёл ДО ShowDialog - юзер: "панель запускается 20 секунд".
+    # Окно уже отрисовано - скан идёт при видимом окне со статусом
+    try {
+        if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) {
+            # v5.17.30.9c: если игра - ТА ЖЕ сессия, что при прошлом полном скане,
+            # области лог-буфера валидны: сразу быстрый скан, старт без 16-24с полного
+            try {
+                $scFile = Join-Path $PSScriptRoot "scan-cache.json"
+                if ( Test-Path $scFile ) {
+                    $sc = Get-Content $scFile -Raw | ConvertFrom-Json
+                    $gpNow = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ( $sc.pid -ne $null -and $gpNow -ne $null -and [int]$sc.pid -eq $gpNow.Id -and $sc.regions -ne $null -and $sc.regions.Count -ge 2 ) {
+                        $script:ScanCache.Regions = @($sc.regions | ForEach-Object { [long]$_ })
+                    }
+                }
+            } catch { }
+            $script:ConfirmBypass = $true
+            try { Send-GameCommand "PathDumpKeys" | Out-Null } finally { $script:ConfirmBypass = $false }
+            Sync-FromLog -Force
+        }
+    } catch { }
+    # v5.17.17: таблица пуста (игра закрыта/крашнулась) - восстанавливаем кадры из
+    # автосейва; v5.17.30.5: если в буфере был CLEAR - НЕ восстанавливаем
+    if ( $script:KeyRows.Count -eq 0 -and -not $script:SawClearInBuffer ) { Restore-KeysBackup }
+
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
     $hwnd = $helper.Handle
     $src = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
@@ -3988,19 +4074,9 @@ if ( Test-Path $iconPath ) {
     } catch { }
 }
 
-# v5.17: при старте панели запрашиваем у игры снапшот пути: таблица строится из
-# дампа, а не из уцелевших обрывков кольцевого лог-буфера (иначе - фантомные кадры)
-if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) {
-    Send-GameCommand "PathDumpKeys" | Out-Null
-    Sync-FromLog -Force
-}
-# v5.17.17: таблица пуста (игра закрыта/крашнулась) - восстанавливаем кадры из
-# автосейва: в панели они живут, пока пользователь сам их не удалит
-# v5.17.30.5: НО если в буфере игры уже был CLEAR (юзер явно очистил путь, а
-# панель перезапускалась) - восстановление вернуло бы только что удалённые кадры
-# (живой случай: F11 очистил путь, панель показывала кадры снова и снова)
-if ( $script:KeyRows.Count -eq 0 -and -not $script:SawClearInBuffer ) { Restore-KeysBackup }
-
+# v5.17.30.9c: стартовый синк и restore ПЕРЕНЕСЕНЫ в Add_Loaded (окно показывается
+# сразу; раньше полный скан 16-24с шёл ДО показа окна - юзер: "панель запускается
+# 20 секунд"). См. Add_Loaded в блоке global hotkeys
 # v5.17.3: необработанные исключения dispatcher'а -> crash.log (панель молча умирала)
 $window.Dispatcher.add_UnhandledException({
     param($s, $a)
