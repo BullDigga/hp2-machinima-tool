@@ -158,20 +158,25 @@ public class MemScanPanel {
         var hitRegs = new System.Collections.Generic.List<long>();  // пары addr,size
         while ( VirtualQueryEx(h, (IntPtr)addr, out mbi, (uint)Marshal.SizeOf(typeof(MBI))) != 0 ) {
             long size = mbi.RegionSize.ToInt64();
-            if ( mbi.State == 0x1000 && size > 0 ) {
+            // v5.17.30.8: string.IndexOf on the decoded chunk instead of the per-byte
+            // managed loop, AND Type==MEM_PRIVATE (0x20000) - image/mapped regions
+            // (textures, exe, dlls) can never hold the log; skipping them cuts the
+            // scan memory 2-3x. CAUTION: MEM_PRIVATE is 0x20000, MEM_MAPPED is
+            // 0x40000 - my first attempt used 0x40000, filtered the heap OUT and
+            // blinded the scanner completely (live catch, MAP chip forever)
+            if ( mbi.State == 0x1000 && size > 0 && mbi.Type == 0x20000 && size >= 0x8000 ) {
                 int cnt = 0;
                 long off = 0;
+                string wpat = "PATHEV:";
                 while ( off < size ) {
                     IntPtr read;
                     int toRead = (int)Math.Min(size - off, probe.Length);
                     if ( ReadProcessMemory(h, (IntPtr)(mbi.BaseAddress.ToInt64() + off), probe, (IntPtr)toRead, out read) ) {
                         int n = read.ToInt32();
-                        for ( int i = 0; i <= n - wprobe.Length; i++ ) {
-                            if ( probe[i] != wprobe[0] || probe[i+1] != wprobe[1] ) continue;
-                            bool ok = true;
-                            for ( int k = 2; k < wprobe.Length; k++ ) { if ( probe[i+k] != wprobe[k] ) { ok = false; break; } }
-                            if ( ok ) { cnt++; i += wprobe.Length; }
-                        }
+                        if ( n <= 0 ) { off += 0x400000; continue; }
+                        string s = System.Text.Encoding.Unicode.GetString(probe, 0, n);
+                        int idx = s.IndexOf(wpat);
+                        while ( idx >= 0 ) { cnt++; idx = s.IndexOf(wpat, idx + wpat.Length); }
                     }
                     off += 0x400000;
                 }
@@ -413,7 +418,7 @@ function Type-Command([string]$cmd, [IntPtr]$hGame) {
             return
         }
         [GameCtl]::TapChar($ch)
-        Start-Sleep -Milliseconds 20
+        Start-Sleep -Milliseconds 14   # v5.17.30.8: 20->14ms (14 < 60fps tick; было безопасно и на лагах)
     }
 }
 
@@ -1263,7 +1268,13 @@ function Complete-SyncFromLogInner {
         }
         # v5.17.30.1: во время печати команд статус принадлежит пачке ("typing [i/N]") -
         # не затираем его завершением скана (иначе юзер не видел отказ "busy")
-        if ( -not $script:SendBusy ) { Set-Status "table: $($rows.Count) keys (memory scan OK)" }
+        # v5.17.30.8: длительность скана в статусе - диагностика жалоб на "таблица
+        # обновляется 5 секунд" (полный скан памяти запускается поллом ~раз в 54с)
+        $scanMs = 0
+        if ( $script:SyncStartedAt -ne $null ) { $scanMs = [int]((Get-Date) - $script:SyncStartedAt).TotalMilliseconds }
+        $scanKind = "fast"
+        if ( -not $script:LastScanFast ) { $scanKind = "full" }
+        if ( -not $script:SendBusy ) { Set-Status "table: $($rows.Count) keys ($scanKind scan ${scanMs}ms)" }
     }
 }
 
@@ -3740,10 +3751,12 @@ $script:UiTimer.Add_Tick({
             # в этом состоянии не было вообще: смена карты в игре (die-телепорт,
             # переход, open из панели) не обнаруживалась, пока юзер не нажмёт кнопку
             # или панель не перезапустится. Быстрый скан каждый полл ловит смену
-            # поколения за ~5.4с (фильтр newMax теперь учитывает gen); раз в 10 поллов
-            # (~54с) полный рескан - буфер лога может перевылелиться, кэш областей
-            # устаревает и быстрый скан молча видит только старые копии
-            $script:PollInGame = ($script:PollInGame + 1) % 10
+            # поколения за ~5.4с (фильтр newMax теперь учитывает gen); полный рескан
+            # РЕЖЕ: v5.17.30.8 - раз в 40 поллов (~3.6 мин) вместо каждых 54с, потому
+            # полный скан памяти занимает 16-24с и душит F8-синки, попавшие в его окно.
+            # Переезд буфера покрывается и иначе: быстрый скан, вернувший ПУСТО из
+            # кэшированных областей, сам вызывает форс (ветка в Complete-SyncFromLog)
+            $script:PollInGame = ($script:PollInGame + 1) % 40
             if ( $script:PollInGame -eq 0 ) { Sync-FromLog -Force } else { Sync-FromLog }
         }
     }
