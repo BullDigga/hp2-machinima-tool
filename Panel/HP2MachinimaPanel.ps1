@@ -395,9 +395,15 @@ function Type-Command([string]$cmd) {
     # unicode-ввод: не зависит от раскладки клавиатуры.
     # v5.17.2: 20мс/символ и 260мс после Enter - при быстрой печати длинных пачек команд
     # (импорт) консоль теряла символы и Enters, значения кадров мутировали
+    # v5.17.30.4: КРИТИЧНО - пауза на символе БЕЗ прокачки dispatcher'а. Wait-Pump
+    # на каждом символе выполнял ВСЮ накопленную очередь (полл-синк каждые 5.4с =
+    # тяжёлый парс событий на UI-потоке) - буквы шли по одной раз в 5-10с (юзер
+    # видел "будто я сам печатаю медленно"). Спиннер во время печати может
+    # подмёрзнуть - это цена корректности ввода; между командами (260мс после
+    # Enter) прокачка остаётся
     foreach ($ch in $cmd.ToCharArray()) {
         [GameCtl]::TapChar($ch)
-        Wait-Pump 20   # v5.17.7: пауза с прокачкой отрисовки на КАЖДОМ символе
+        Start-Sleep -Milliseconds 20
     }
 }
 
@@ -417,6 +423,7 @@ function Focus-GameWindow([IntPtr]$h) {
 }
 
 $script:SendBusy = $false
+$script:SendDepth = 0     # v5.17.30.4: защита от втиснутых отправок поверх живой
 $script:ConfirmBypass = $false
 function Confirm-GameActive {
     # v5.17.15 (#1): перед манипуляциями с терминалом убеждаемся, что игра НА УРОВНЕ.
@@ -462,6 +469,14 @@ function Send-GameCommands([string[]]$cmds) {
         Set-Status "busy: the previous command is still sending - try again in a moment" "warn"
         return "busy - command still sending"
     }
+    # v5.17.30.4: РЕЕНТЕР-ГВАРД. Watchdog может сбросить SendBusy живой отправки -
+    # новая команда тогда стартует ВНУТРИ Wait-Pump старой (прокачка!) и ДВЕ печати
+    # идут вперемешку - команды портятся посимвольно ("перестал карты грузить").
+    # Глубина защищает от этого независимо от состояния флага
+    if ( $script:SendDepth -gt 0 ) {
+        Set-Status "busy: another send is still typing (re-entry blocked)" "warn"
+        return "busy - re-entry blocked"
+    }
     if ( -not $script:ConfirmBypass -and -not (Confirm-GameActive) ) { return "aborted: game not on a level" }
     # v5.17.27: фоновые зонды (ConfirmBypass: старт панели, 5.4с-полл в меню) обязаны
     # сфокусировать игру ради консоли, но не должны УВОДИТЬ фокус - жалоба юзера
@@ -470,6 +485,7 @@ function Send-GameCommands([string[]]$cmds) {
     $fgSaved = [IntPtr]::Zero
     if ( $script:ConfirmBypass ) { $fgSaved = [GameCtl]::GetForegroundWindow() }
     $script:SendBusy = $true
+    $script:SendDepth = $script:SendDepth + 1
     $script:SendStartedAt = Get-Date
     try {
         Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
@@ -491,10 +507,25 @@ function Send-GameCommands([string[]]$cmds) {
         if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
         # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
         # Обычный ` остаётся терминалом пользователя.
+        # v5.17.30.4: ЖИВОЙ ФАКТ - ПЕРВАЯ команда пачки печаталась в ещё закрытую
+        # консоль и уходила в геймплей (буфер: 4x PathClear потеряно при дошедших
+        # финальных PathPing; open карт - та же история: "перестал грузить карты").
+        # Паузы 450/1200мс НЕ помогли => лаг открытия нестабилен. Надёжное решение:
+        # ТРОЙНОЙ ensure-open. Ветка Shift+` в HPConsole ИДЕМПОТЕНТНА (повтор при
+        # уже открытой консоли ничего не закрывает - только LaunchUWindow/ShowConsole
+        # снова) - три тапа с паузами гарантируют открытие независимо от лагов
         [GameCtl]::KeyDown([uint16]0x10)
         [GameCtl]::Tap([uint16]$VK['grave'])
         [GameCtl]::KeyUp([uint16]0x10)
-        Wait-Pump 120
+        Wait-Pump 350
+        [GameCtl]::KeyDown([uint16]0x10)
+        [GameCtl]::Tap([uint16]$VK['grave'])
+        [GameCtl]::KeyUp([uint16]0x10)
+        Wait-Pump 350
+        [GameCtl]::KeyDown([uint16]0x10)
+        [GameCtl]::Tap([uint16]$VK['grave'])
+        [GameCtl]::KeyUp([uint16]0x10)
+        Wait-Pump 350
         # v5.17.8: прогресс [i/N] с бегущими точками + проверка фокуса ПЕРЕД КАЖДОЙ командой.
         # Alt-Tab во время пачки (импорт) печатал остаток команд в ЧУЖОЕ окно, а консоль игры
         # оставалась открытой (чёрный экран). Теперь: фокус потерян -> один тихий рефокус,
@@ -502,6 +533,13 @@ function Send-GameCommands([string[]]$cmds) {
         $ci = 0
         $res = ""
         foreach ($c in $cmds) {
+            # v5.17.30.4: само-прерывание застрявшей отправки - watchdog полла (60с)
+            # сбрасывает флаг, но ЦИКЛ старой отправки продолжает жить и печатать;
+            # теперь цикл умирает сам до того, как новая отправка начнёт мешать
+            if ( $script:SendStartedAt -ne $null -and ((Get-Date) - $script:SendStartedAt).TotalSeconds -gt 50 ) {
+                $res = "send timed out at [$($ci+1)/$($cmds.Count)] - aborted (stale typing stopped)"
+                break
+            }
             $dots = "." * (1 + ($ci % 3))
             Set-Status ("typing [$($ci+1)/$($cmds.Count)] $c $dots") "warn"
             if ( [GameCtl]::GetForegroundWindow() -ne $h -and -not (Focus-GameWindow $h) ) {
@@ -542,6 +580,7 @@ function Send-GameCommands([string[]]$cmds) {
         return ("$($cmds.Count) cmds OK ${dur}ms  " + (Get-Date -Format HH:mm:ss))
     } finally {
         $script:SendBusy = $false
+        $script:SendDepth = [Math]::Max(0, $script:SendDepth - 1)
         try {
             if ( $fgSaved -ne [IntPtr]::Zero -and [GameCtl]::GetForegroundWindow() -ne $fgSaved ) {
                 [GameCtl]::Tap(0x12) | Out-Null
@@ -872,6 +911,32 @@ function Complete-SyncFromLogInner {
             if ( $newMax -le $script:ScanCache.LastSeq ) { $txt = ""; $src = "" }
         }
     }
+    # v5.17.30.4: ДЕШЁВЫЙ гейт свежести ПЕРЕД тяжёлым парсом. Полные сканы всегда
+    # несли ВСЕ события (тысячи PSObject'ов на UI-потоке), а полл теперь форсирует
+    # их каждые ~54с + отложенные таймеры после команд - парс шёл каждые несколько
+    # секунд и морил печать команд (см. Type-Command). Regex-проход в тысячи раз
+    # дешевле материализации; нечего нового - выходим без парса
+    if ( $txt -ne "" ) {
+        $frGen = 0; $frSeq = 0; $frAny = $false
+        foreach ( $fm in [regex]::Matches($txt, 'PATHEV:(\d+):(\d+)\|') ) {
+            $frAny = $true
+            $fg2 = [long]$fm.Groups[1].Value
+            $fv2 = [long]$fm.Groups[2].Value
+            if ( ($fg2 -gt $frGen) -or ($fg2 -eq $frGen -and $fv2 -gt $frSeq) ) { $frGen = $fg2; $frSeq = $fv2 }
+        }
+        if ( $frAny ) {
+            $frFresh = ( ($frGen -gt $script:LastGen) -or ($frGen -eq $script:LastGen -and $frSeq -gt $script:ScanCache.LastSeq) )
+            if ( -not $frFresh ) {
+                foreach ( $fp in [regex]::Matches($txt, 'PLVL:(\d+)\|') ) {
+                    if ( [long]$fp.Groups[1].Value -gt $script:LastGen ) { $frFresh = $true; break }
+                }
+            }
+            if ( -not $frFresh ) {
+                if ( -not $script:SendBusy ) { Set-Status "table: $($script:KeyRows.Count) keys (no new events)" }
+                return
+            }
+        }
+    }
     if ( $txt -ne "" ) {
         # v4.5: только PATHEV:<seq>|TYPE|data - события с монотонным номером.
         # Старые PATHADD-строки игнорируются: в памяти живут КОПИИ буфера лога,
@@ -879,8 +944,14 @@ function Complete-SyncFromLogInner {
         # v5.17.3: data только из безопасного charset - в хвосты частичных копий буфера
         # попадает мусор кучи ("98938.00䏆▗"), каст в Double ронял ВЕСЬ синк
         $rxEv = [regex]'PATHEV:(\d+):(\d+)\|([A-Z]+)\|?([0-9A-Za-z.,:_\-]*)'
+        # v5.17.30.4: maxGen ДО материализации - PSObject создаётся только для событий
+        # ТЕКУЩЕГО поколения (обычные копии буфера держат сотни событий прошлых
+        # уровней; их материализация на UI-потоке и была главным тормозом синка)
         $ev = @()
+        $mgPre = 0
+        foreach ( $mp2 in $rxEv.Matches($txt) ) { $g3 = [long]$mp2.Groups[1].Value; if ( $g3 -gt $mgPre ) { $mgPre = $g3 } }
         foreach ( $m in $rxEv.Matches($txt) ) {
+            if ( [long]$m.Groups[1].Value -ne $mgPre ) { continue }
             $ev += New-Object PSObject -Property @{Gen=[long]$m.Groups[1].Value; Seq=[long]$m.Groups[2].Value; T=$m.Groups[3].Value; D=$m.Groups[4].Value}
         }
         # v5.17.28.5: MAP-событие уровня может лежать в ПРЕДЫДУЩЕМ поколении:
@@ -3567,7 +3638,10 @@ $script:UiTimer.Add_Tick({
         $script:SpinAngle = ($script:SpinAngle + 27) % 360
         $script:SpinTransform.Angle = $script:SpinAngle
     }
-    if ( [MemScanPanel]::AsyncState -eq 2 ) { Complete-SyncFromLog }
+    # v5.17.30.4: завершение скана ОТКЛАДЫВАЕТСЯ на время печати команд - парс
+    # событий идёт на UI-потоке и морил посимвольную печать (буквы раз в 5-10с).
+    # AsyncState остаётся 2 - следующий тик после отправки доделает
+    if ( [MemScanPanel]::AsyncState -eq 2 -and -not $script:SendBusy ) { Complete-SyncFromLog }
     # v5.15.1: состояние игры опрашиваем раз в ~5.4с:
     # - игра вышла -> сброс карты/плей-состояния и лочка
     # - игра есть, уровень не определён -> полный рескан ловит MAP-событие уровня и разблокирует UI
@@ -3590,9 +3664,9 @@ $script:UiTimer.Add_Tick({
             # старше 25с = отправка умерла, сбрасываем (нормальная печать <10с).
             # v5.17.30.1: Sync-FromLog в этой ветке безопасен (сброс 20s-зависшего
             # скана теперь достижим)
-            if ( $script:SendStartedAt -ne $null -and ((Get-Date) - $script:SendStartedAt).TotalSeconds -gt 25 ) {
+            if ( $script:SendStartedAt -ne $null -and ((Get-Date) - $script:SendStartedAt).TotalSeconds -gt 60 ) {
                 $script:SendBusy = $false
-                Set-Status "send timed out (>25s) - flag reset, try again" "warn"
+                Set-Status "send timed out (>60s) - flag reset, try again" "warn"
             }
             Sync-FromLog
         } elseif ( $script:CurrentMap -eq "" ) {
