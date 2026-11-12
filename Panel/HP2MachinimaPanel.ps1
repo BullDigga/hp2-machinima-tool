@@ -391,7 +391,7 @@ function Wait-Pump([int]$ms) {
     }
 }
 
-function Type-Command([string]$cmd) {
+function Type-Command([string]$cmd, [IntPtr]$hGame) {
     # unicode-ввод: не зависит от раскладки клавиатуры.
     # v5.17.2: 20мс/символ и 260мс после Enter - при быстрой печати длинных пачек команд
     # (импорт) консоль теряла символы и Enters, значения кадров мутировали
@@ -401,7 +401,17 @@ function Type-Command([string]$cmd) {
     # видел "будто я сам печатаю медленно"). Спиннер во время печати может
     # подмёрзнуть - это цена корректности ввода; между командами (260мс после
     # Enter) прокачка остаётся
+    # v5.17.30.6: ФОКУС НА КАЖДОМ СИМВОЛЕ (юзер: "Alt-Tab - продолжает печататься
+    # в другом окне, это критично"). Проверка фокуса была раз в КОМАНДУ - остаток
+    # команды допечатывался в чужое окно. Теперь: фокус ушёл => СРАЗУ стоп (окно
+    # утечки сужено до одного символа/20мс) и БЕЗ рефокуса - юзер сознательно
+    # ушёл Alt-Tab'ом, выдёргивать его обратно нельзя. Родительский цикл видит
+    # SendFocusLost и прерывает пачку
     foreach ($ch in $cmd.ToCharArray()) {
+        if ( [GameCtl]::GetForegroundWindow() -ne $hGame ) {
+            $script:SendFocusLost = $true
+            return
+        }
         [GameCtl]::TapChar($ch)
         Start-Sleep -Milliseconds 20
     }
@@ -424,6 +434,7 @@ function Focus-GameWindow([IntPtr]$h) {
 
 $script:SendBusy = $false
 $script:SendDepth = 0     # v5.17.30.4: защита от втиснутых отправок поверх живой
+$script:SendFocusLost = $false  # v5.17.30.6: фокус ушёл посреди печати команды
 $script:ConfirmBypass = $false
 function Confirm-GameActive {
     # v5.17.15 (#1): перед манипуляциями с терминалом убеждаемся, что игра НА УРОВНЕ.
@@ -532,6 +543,7 @@ function Send-GameCommands([string[]]$cmds) {
         # не вышло -> чистый ABORT (ничего не печатаем дальше), пользователь видит [i/N].
         $ci = 0
         $res = ""
+        $script:SendFocusLost = $false
         foreach ($c in $cmds) {
             # v5.17.30.4: само-прерывание застрявшей отправки - watchdog полла (60с)
             # сбрасывает флаг, но ЦИКЛ старой отправки продолжает жить и печатать;
@@ -542,11 +554,18 @@ function Send-GameCommands([string[]]$cmds) {
             }
             $dots = "." * (1 + ($ci % 3))
             Set-Status ("typing [$($ci+1)/$($cmds.Count)] $c $dots") "warn"
-            if ( [GameCtl]::GetForegroundWindow() -ne $h -and -not (Focus-GameWindow $h) ) {
-                $res = "ABORTED at [$($ci+1)/$($cmds.Count)] - focus lost! unfinished text may have gone to another window; press `` in game to close the console"
+            # v5.17.30.6: фокус потерян => ЧИСТЫЙ abort БЕЗ рефокуса (Alt-Tab юзера -
+            # сознательное действие, выдёргивать фокус обратно нельзя; остаток пачки
+            # не печатается, Type-Command сам остановился на первом символе не в игру)
+            if ( [GameCtl]::GetForegroundWindow() -ne $h ) {
+                $res = "ABORTED at [$($ci+1)/$($cmds.Count)] - you switched away from the game; typing stopped, no keys were sent to other windows"
                 break
             }
-            Type-Command $c
+            Type-Command $c $h
+            if ( $script:SendFocusLost ) {
+                $res = "ABORTED mid-command [$($ci+1)/$($cmds.Count)] - you Alt-Tabbed; typing stopped (at most 1 char may have slipped)"
+                break
+            }
             [GameCtl]::Tap([uint16]$VK['enter'])
             Wait-Pump 260
             $ci++
@@ -3486,17 +3505,27 @@ function Update-SelectionButtons {
     try { Update-MapPreview } catch { }
     # v5.17.30: подкнопка "вернуться к кадрам" (видна только при чужой карте)
     Update-KeyMapGoButton
+    # v5.17.30.6: кнопки с ЖЁСТКИМ фоном (FOV->key мятный, Speed->key жёлтый и т.д.)
+    # игнорируют стандартный "серый" триггер стиля при IsEnabled=False (локальное
+    # значение фона приоритетнее триггера) - выглядели ДОСТУПНЫМИ будучи
+    # заблокированными (репорт юзера). Затемнение Opacity = честная индикация
+    function Set-CtlEnabled([string]$name, [bool]$en) {
+        try {
+            $controls[$name].IsEnabled = $en
+            $controls[$name].Opacity = $(if ( $en ) { 1.0 } else { 0.45 })
+        } catch { }
+    }
     # v5.17.14 (#8): ветка ИГРАЕТ проверяется ПЕРВОЙ и безусловно - иначе синк или
     # 5.4с-полл со сбойным сканом (CurrentMap слетел в "") гасили Stop посреди
     # проигрывания, а через несколько секунд полл его возвращал
     if ( $script:Playing ) {
         foreach ( $b in $script:PlayLock ) {
-            try { $controls[$b].IsEnabled = $false } catch { }
+            Set-CtlEnabled $b $false
         }
-        $controls['BtnExport'].IsEnabled = $true
+        Set-CtlEnabled 'BtnExport' $true
         $controls['BtnPathStop'].IsEnabled = $true
-        $controls['BtnPathPlay'].IsEnabled = $true
-        $controls['BtnPathPlaySpeed'].IsEnabled = $true
+        Set-CtlEnabled 'BtnPathPlay' $true
+        Set-CtlEnabled 'BtnPathPlaySpeed' $true
         return
     }
     # v5.15: игра не на карте (закрыта или меню) - доступна только Прозрачность и поле
@@ -3505,7 +3534,7 @@ function Update-SelectionButtons {
     if ( -not $gameOn ) {
         $rowsLeft = ($script:KeyRows -ne $null -and $script:KeyRows.Count -gt 0)
         foreach ( $b in $script:NoGameDep ) {
-            try { $controls[$b].IsEnabled = $false } catch { }
+            Set-CtlEnabled $b $false
         }
         try {
             $controls['DgKeys'].IsEnabled = $rowsLeft
@@ -3531,7 +3560,7 @@ function Update-SelectionButtons {
         # другой карте пуст; таблица замораживается целиком (строки чужой карты видны,
         # но edit/goto/trash на них идти не должны - goto/вставка считаются по пути игры)
         foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed','BtnFovAll','BtnSpeedAll')) ) {
-            try { $controls[$b].IsEnabled = $false } catch { }
+            Set-CtlEnabled $b $false
         }
         try { $controls['DgKeys'].IsEnabled = $false } catch { }
         # v5.17.7: цикл PlayLock выше перевключил Set FOV / Set fly speed - вернуть
@@ -3548,17 +3577,21 @@ function Update-SelectionButtons {
         Set-Status ("keyframes are from '$($script:KeyMap)', but '$($script:CurrentMap)' is loaded - load the keyframe map or clear the table")
         return
     }
-    foreach ( $b in $script:SelDep ) { $controls[$b].IsEnabled = $has }
-    # v5.17.30: после wrong-map лока и PlayLock таблица включается обратно явно
-    try { $controls['DgKeys'].IsEnabled = $true } catch { }
     # v5.17.30: КРИТИЧНЫЙ фикс - NoGameDep кнопки никогда не включались обратно.
     # Ветка "игра не на карте" (старт панели до синка: CurrentMap ещё пуст, игра
     # закрыта/в меню) их выключала, нормальная ветка - нет. Кнопки выглядели
     # цветными (жёсткий фон у ADD), но НЕ КЛИКАЛИСЬ ("карта видна, кнопки мертвы"
     # - репродукция: перезапуск панели при уже загруженной карте)
-    foreach ( $b in $script:NoGameDep ) { try { $controls[$b].IsEnabled = $true } catch { } }
-    foreach ( $b in $script:KeysDep ) { $controls[$b].IsEnabled = ($n -gt 0) }
-    $controls['BtnPathClear'].IsEnabled = ($n -gt 0)
+    # v5.17.30.6: ре-энeйбл ПЕРЕМЕЩЁН ДО SelDep/KeysDep - он ПЕРЕЗАПИСЫВАЛ их
+    # правила (BtnFovKey/BtnKeySpeed из NoGameDep включались после "IsEnabled=$has"
+    # и оставались яркими БЕЗ выделенного кадра - репорт юзера; FovAll/SpeedAll
+    # перезаписывались KeysDep ниже, потому виделись правильными)
+    foreach ( $b in $script:NoGameDep ) { Set-CtlEnabled $b $true }
+    foreach ( $b in $script:SelDep ) { Set-CtlEnabled $b $has }
+    # v5.17.30: после wrong-map лока и PlayLock таблица включается обратно явно
+    try { $controls['DgKeys'].IsEnabled = $true } catch { }
+    foreach ( $b in $script:KeysDep ) { Set-CtlEnabled $b ($n -gt 0) }
+    Set-CtlEnabled 'BtnPathClear' ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = $false
     # v5.17.6: FOV->key / Speed->key серые, если выбранная строка УЖЕ имеет значение из поля
     try {
@@ -3566,8 +3599,8 @@ function Update-SelectionButtons {
         if ( $selRow -ne $null ) {
             $fovTxt = $controls['TbFov'].Text.Trim()
             $spdTxt = $controls['TbSpeed'].Text.Trim()
-            $controls['BtnFovKey'].IsEnabled = ( ($fovTxt -match '^\d+(\.\d+)?$') -and ([double]$fovTxt -ne $selRow.FOV) )
-            $controls['BtnKeySpeed'].IsEnabled = ( ($spdTxt -match '^\d+(\.\d+)?$') -and ([double]$spdTxt -ne $selRow.Speed) )
+            Set-CtlEnabled 'BtnFovKey' ( ($fovTxt -match '^\d+(\.\d+)?$') -and ([double]$fovTxt -ne $selRow.FOV) )
+            Set-CtlEnabled 'BtnKeySpeed' ( ($spdTxt -match '^\d+(\.\d+)?$') -and ([double]$spdTxt -ne $selRow.Speed) )
         }
     } catch { }
     # v5.17.7: FOV->ALL / Speed->ALL серые, если во ВСЕХ кадрах уже стоит значение из
@@ -3584,8 +3617,8 @@ function Update-SelectionButtons {
                 if ( $fovOk -and [double]([math]::Round([double]$fovTxt)) -ne $r.FOV ) { $sameFov = $false }
                 if ( $spdOk -and [double]([math]::Round([double]$spdTxt)) -ne $r.Speed ) { $sameSpd = $false }
             }
-            $controls['BtnFovAll'].IsEnabled = (-not $sameFov)
-            $controls['BtnSpeedAll'].IsEnabled = (-not $sameSpd)
+            Set-CtlEnabled 'BtnFovAll' (-not $sameFov)
+            Set-CtlEnabled 'BtnSpeedAll' (-not $sameSpd)
         }
     } catch { }
     # v5.17.7: Set FOV / Set fly speed - вернуть правило "в поле уже применённое значение":
