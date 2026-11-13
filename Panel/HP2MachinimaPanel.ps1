@@ -1321,6 +1321,207 @@ function Find-LogFile {
     return ""
 }
 
+# ---------- v5.17.31 (#5): OBS запись через obs-websocket (порт 4455) ----------
+Add-TypeCached -TypeName 'ObsWs' -Source @"
+using System;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Security.Cryptography;
+
+public class ObsWs {
+    // ---- protocol state (polled by the panel timer, no events marshalling) ----
+    public static volatile bool Connected = false;
+    public static volatile bool Recording = false;
+    public static volatile string LastStatus = "";
+    private static ClientWebSocket ws = null;
+    private static string pass = "";
+    private static System.Collections.Concurrent.ConcurrentQueue<string> inbox = new System.Collections.Concurrent.ConcurrentQueue<string>();
+    private static int lastToggleMs = 0;   // v5.17.31.7: TickCount последнего Start/Stop запроса
+    // v5.17.31.6-DEBUG: трассировка "красный STOP не гаснет" (репорт юзера).
+    // LogFile задаётся панелью сразу после загрузки типа
+    public static string LogFile = "";
+    private static object lglock = new object();
+    public static int InboxDepth { get { return inbox.Count; } }
+    private static void Log(string s) {
+        try {
+            if ( LogFile == "" ) return;
+            lock ( lglock ) { System.IO.File.AppendAllText(LogFile, DateTime.Now.ToString("HH:mm:ss.fff") + " OBS: " + s + "\r\n"); }
+        } catch { }
+    }
+
+    // OBS auth: authString = b64(sha256( b64(sha256(password+salt)) + challenge ))
+    private static string B64(byte[] b) { return Convert.ToBase64String(b); }
+    private static byte[] Sha256(string s) {
+        using (var h = new SHA256Managed()) { return h.ComputeHash(Encoding.UTF8.GetBytes(s)); }
+    }
+    private static string AuthString(string salt, string challenge) {
+        string secret = B64(Sha256(pass + salt));
+        return B64(Sha256(secret + challenge));
+    }
+
+    private static void SendJson(string json) {
+        if ( ws == null || ws.State != WebSocketState.Open ) return;
+        byte[] b = Encoding.UTF8.GetBytes(json);
+        ws.SendAsync(new ArraySegment<byte>(b), WebSocketMessageType.Text, true, CancellationToken.None).Wait(1000);
+    }
+
+    // v5.17.31.3: ЕДИНСТВЕННЫЙ читатель сокета, БЕЗ cancellation token.
+    // Прежний RecvText передавал в ReceiveAsync CancellationTokenSource(timeout) -
+    // в .NET отмена токена АБОРТИТ весь ClientWebSocket: соединение стояло в
+    // простое 1с (нечего читать), токен срабатывал, сокет абортится, детектор
+    // смерти сбрасывал Connected, полл переподключался - и по кругу каждую
+    // секунду (репорт юзера: "подключение длится 1 секунду и прерывается").
+    // Теперь читаем блокирующе и складываем в inbox, потребитель - поток
+    // коннекта (handshake, затем парсер событий). Плюс: раньше RxLoop и
+    // GetRecordStatus читали параллельно - два одновременных ReceiveAsync
+    // на одном ClientWebSocket запрещены
+    private static void ReadLoop() {
+        var mine = ws;   // сокет ЭТОГО соединения (guard против гонки с рестартом)
+        var buf = new byte[65536];
+        while ( ws == mine && mine.State == WebSocketState.Open ) {
+            try {
+                var r = mine.ReceiveAsync(new ArraySegment<byte>(buf), CancellationToken.None).Result;
+                if ( r.Count == 0 || r.MessageType == WebSocketMessageType.Close ) break;
+                if ( ws != mine ) break;   // сокет уже сменился - мусор не пишем
+                string m = Encoding.UTF8.GetString(buf, 0, r.Count);
+                Log("rx " + r.Count + "b: " + (m.Length > 160 ? m.Substring(0, 160) : m));
+                inbox.Enqueue(m);
+            } catch ( Exception e ) { Log("readloop exc: " + e.Message); break; }
+        }
+        Log("readloop exit");
+    }
+    private static string InboxTake(int timeoutMs) {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while ( sw.ElapsedMilliseconds < timeoutMs ) {
+            string s;
+            if ( inbox.TryDequeue(out s) ) return s;
+            Thread.Sleep(15);
+        }
+        return "";
+    }
+    private static void ParseMsg(string m) {
+        if ( m.IndexOf("RecordStateChanged") >= 0 ) {
+            // события сервера ВСЕГДА авторитетны - приходят ровно в момент перехода
+            if ( m.IndexOf("\"outputActive\":true") >= 0 ) { Recording = true; Log("parse event -> Recording=true"); }
+            else if ( m.IndexOf("\"outputActive\":false") >= 0 ) { Recording = false; Log("parse event -> Recording=false"); }
+            else Log("parse event: changed msg, no outputActive field!");
+        }
+        // v5.17.31.7: серверные ОТКАЗЫ Start/Stop откатывают оптимистичный флаг
+        if ( m.IndexOf("\"requestType\":\"StartRecord\"") >= 0 && m.IndexOf("\"result\":false") >= 0 ) {
+            Recording = false; Log("StartRecord REJECTED -> Recording=false");
+        }
+        if ( m.IndexOf("\"requestType\":\"StopRecord\"") >= 0 && m.IndexOf("\"result\":false") >= 0 ) {
+            Recording = true; Log("StopRecord REJECTED -> Recording=true");
+        }
+        // ответ на GetRecordStatus описывает состояние НА МОМЕНТ ОТПРАВКИ запроса.
+        // Если после отправки был Start/Stop - ответ УСТАРЕВШИЙ: он красил кнопку
+        // ПОСЛЕ конца кино и гас только следующим пингом (репорт юзера). Поэтому
+        // ping-ответы в течение 3с после переключения игнорируются
+        if ( m.IndexOf("\"requestType\":\"GetRecordStatus\"") >= 0 ) {
+            int age = Environment.TickCount - lastToggleMs;
+            if ( age >= 0 && age < 3000 ) { Log("parse ping DROP (stale, toggle " + age + "ms ago)"); return; }
+            if ( m.IndexOf("\"outputActive\":true") >= 0 ) { Recording = true; Log("parse ping -> Recording=true"); }
+            else if ( m.IndexOf("\"outputActive\":false") >= 0 ) { Recording = false; Log("parse ping -> Recording=false"); }
+            else Log("parse ping: response msg, no outputActive field!");
+        }
+    }
+    private static string Extract(string s, string a, string b) {
+        int i = s.IndexOf(a); if ( i < 0 ) return "";
+        i += a.Length; int j = s.IndexOf(b, i); if ( j < 0 ) return "";
+        return s.Substring(i, j - i);
+    }
+
+    public static volatile bool Connecting = false;
+    public static void Connect(string host, int port, string password) {
+        // v5.17.31: connect on a BACKGROUND thread - the panel UI must never freeze
+        // (with the OBS server disabled the 3s connect timeout ran on the UI thread
+        // every poll = the panel was frozen most of the time)
+        if ( Connecting || Connected ) return;
+        Connecting = true;
+        pass = password ?? "";
+        int port2 = port; string host2 = host;
+        Thread t = new Thread(new ThreadStart(() => {
+            Disconnect();
+            try {
+                ws = new ClientWebSocket();
+                ws.ConnectAsync(new Uri("ws://" + host2 + ":" + port2 + "/"), CancellationToken.None).Wait(3000);
+                if ( ws.State != WebSocketState.Open ) { ws = null; LastStatus = "connect failed"; Log("connect failed"); Connecting = false; return; }
+                var mine = ws;
+                Thread rd = new Thread(new ThreadStart(ReadLoop)); rd.IsBackground = true; rd.Start();
+                string hello = InboxTake(3000);
+                string salt = Extract(hello, "\"salt\":\"", "\"");
+                string challenge = Extract(hello, "\"challenge\":\"", "\"");
+                string ident;
+                if ( salt != "" ) {
+                    // v5.17.31.1: rpcVersion = 1 (НЕ 5): "5.x" - версия ПЛАГИНА,
+                    // а в Hello сервер объявляет поддерживаемую rpcVersion:1;
+                    // запрос 5 давал close 4010 "RPC version not supported"
+                    ident = "{\"op\":1,\"d\":{\"rpcVersion\":1,\"eventSubscriptions\":33,\"authentication\":\"" + AuthString(salt, challenge) + "\"}}";
+                } else {
+                    ident = "{\"op\":1,\"d\":{\"rpcVersion\":1,\"eventSubscriptions\":33}}";
+                }
+                SendJson(ident);
+                string ack = InboxTake(3000);
+                Log("ack: " + (ack.Length > 120 ? ack.Substring(0, 120) : ack));
+                if ( ack.IndexOf("\"op\":2") >= 0 || ack.IndexOf("Negotiated") >= 0 ) {
+                    Connected = true; LastStatus = "connected";
+                    // v5.17.31.3: парсер событий живёт в ЭТОМ же потоке до смерти
+                    // соединения (единственный потребитель inbox). Connecting
+                    // остаётся true пока соединение живо - лишний Connect полла
+                    // отсеется guard'ом. Смерть сокета -> выход -> сброс флагов
+                    while ( Connected && ws == mine && mine.State == WebSocketState.Open ) {
+                        string m = InboxTake(1000);
+                        if ( m.Length > 0 ) ParseMsg(m);
+                    }
+                    Log("parser exit: conn=" + Connected + " wsMine=" + (ws == mine) + " state=" + (ws == null ? "null" : ws.State.ToString()));
+                    if ( Connected && ws == mine && mine.State != WebSocketState.Open ) {
+                        Connected = false; Recording = false; LastStatus = "connection lost";
+                    }
+                } else {
+                    LastStatus = (ack.IndexOf("auth") >= 0) ? "auth failed (wrong password)" : "handshake failed";
+                    Connected = false;
+                    Log("handshake failed: " + LastStatus);
+                    try { ws.Dispose(); } catch { }
+                    ws = null;
+                }
+            } catch ( Exception e ) { LastStatus = e.Message; Log("connect thread exc: " + e.Message); ws = null; }
+            Connecting = false;
+        }));
+        t.IsBackground = true;
+        t.Start();
+    }
+    public static void Disconnect() {
+        Connected = false; Recording = false;
+        var w = ws;
+        try { if ( w != null ) w.Dispose(); } catch { }
+        ws = null;
+        string s;
+        while ( inbox.TryDequeue(out s) ) { }
+    }
+    public static bool Request(string type) {
+        // v5.17.31.2: раньше возвращала true даже при мёртвом сокете (SendJson
+        // молча выходил) - клик "ничего не давал" и панель рапортовала успех
+        if ( !Connected || ws == null || ws.State != WebSocketState.Open ) { Connected = false; Recording = false; Log("req " + type + " FAIL (no socket)"); return false; }
+        SendJson("{\"op\":6,\"d\":{\"requestType\":\"" + type + "\",\"requestId\":\"p\"}}");
+        // v5.17.31.7: ОПТИМИСТИЧНЫЙ флаг - кнопка OBS красится ровно в момент
+        // клика/конца кино (синхронно с кнопкой Stop), а не когда доедет событие
+        if ( type == "StartRecord" ) { Recording = true; lastToggleMs = Environment.TickCount; }
+        else if ( type == "StopRecord" ) { Recording = false; lastToggleMs = Environment.TickCount; }
+        Log("req " + type + " sent -> Recording=" + Recording);
+        return ws.State == WebSocketState.Open;
+    }
+    public static bool GetRecordStatus() {
+        // v5.17.31.3: fire-and-forget - ответ парсит ReadLoop/ParseMsg
+        if ( !Connected || ws == null || ws.State != WebSocketState.Open ) { Connected = false; Recording = false; Log("ping FAIL (no socket)"); return false; }
+        SendJson("{\"op\":6,\"d\":{\"requestType\":\"GetRecordStatus\",\"requestId\":\"s\"}}");
+        return true;
+    }
+}
+"@
+# v5.17.31.6-DEBUG: трассировка OBS-флагов в obs-debug.log (красный STOP не гаснет)
+try { [ObsWs]::LogFile = (Join-Path $PSScriptRoot "obs-debug.log") } catch { }
+
 function Sync-AfterCommand([string]$status) {
     # событие пишется в лог сразу после Enter - короткая пауза на всякий случай.
     # v5.16.2 делала синк ПОСЛЕ команды ВСЕГДА полным ("событие в хвосте буфера") -
@@ -1817,6 +2018,39 @@ function Send-PathSaveAndSync([string]$prefix) {
         <Button Name="BtnImport" Content="↙  Import from file" Height="34"
                 Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
                 HorizontalContentAlignment="Left" Padding="14,4"/>
+        <!-- v5.17.31 (#5): OBS запись. Состояния: OBS не запущен / WS не подключён /
+             подключён (REC) / пишем (STOP). Иконка OBS - упрощённый вектор логотипа.
+             Кнопка ⓘ справа: наведение показывает инструкцию настройки OBS WS -->
+        <Grid Height="34" Margin="0,6,0,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <Button Grid.Column="0" Name="BtnObsRec"
+                  Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                  HorizontalContentAlignment="Left" Padding="14,4" ToolTipService.ShowOnDisabled="True">
+            <StackPanel Orientation="Horizontal">
+              <Image Name="ImgObsLogo" Width="20" Height="20" VerticalAlignment="Center" Margin="0,0,10,0"/>
+              <TextBlock Name="TbObsRec" Text="OBS  ●  REC" FontWeight="Bold" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Button>
+          <Button Grid.Column="1" Name="BtnObsKey" Width="34" Margin="4,0,0,0"
+                  Background="Transparent" BorderThickness="0" Cursor="Hand" VerticalAlignment="Center"
+                  ToolTipService.InitialShowDelay="0">
+            <TextBlock Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="{DynamicResource NavBrush}"/>
+          </Button>
+          <Button Grid.Column="2" Name="BtnObsInfo" Width="34" Margin="4,0,0,0"
+                  Background="Transparent" BorderThickness="0" Cursor="Hand" VerticalAlignment="Center"
+                  ToolTipService.InitialShowDelay="0" ToolTipService.ShowDuration="20000">
+            <TextBlock Text="&#xE946;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="{DynamicResource NavBrush}"/>
+          </Button>
+        </Grid>
+        <!-- v5.17.31.4: авто-запись OBS вместе с Play (просьба юзера): запись
+             стартует при запуске воспроизведения и заканчивается при его окончании -->
+        <CheckBox Name="CbObsAuto" Content="REC with Play" Foreground="{DynamicResource MutedBrush}"
+                  FontSize="12" Margin="8,6,0,0" Cursor="Hand"
+                  ToolTipService.InitialShowDelay="0" HorizontalAlignment="Left"/>
       </StackPanel>
     </Grid>
 
@@ -1843,7 +2077,7 @@ function Send-PathSaveAndSync([string]$prefix) {
       <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
       <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
       <TextBlock Grid.Row="1" Grid.Column="0" Name="TxFlySpeed" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
-      <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="500" Width="56" Height="30" FontSize="13"
+      <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="600" Width="56" Height="30" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
       <Button Grid.Row="1" Grid.Column="3" Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
@@ -1887,7 +2121,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -1983,6 +2217,318 @@ function Update-MapPreview {
 }
 
 # ---------- v5.17.30: die-телепорт / переход уровня с кадрами другой карты ----------
+# ---------- v5.17.31 (#5): OBS запись - состояния кнопки и клик ----------
+$controls['BtnObsKey'].Add_Click({
+    # v5.17.31 (#5): МОДАЛЬНОЕ окно пароля OBS (макет юзера): логотип OBS +
+    # "OBS WebSocket" + настройка подключения: порт и пароль, кнопка "где
+    # посмотреть", Сохранить (жёлтая)/Отмена. Сохранение: settings.json +
+    # переподключение (панель опрашивает и сама подхватит)
+    try {
+        $L = $script:LocData[$script:Lang]
+        $obsIconBmp = $null
+        try {
+            $obsIconBmp = New-Object Windows.Media.Imaging.BitmapImage
+            $obsIconBmp.BeginInit()
+            $obsIconBmp.UriSource = (New-Object Uri((Join-Path $PSScriptRoot "obs-icon.png")))
+            $obsIconBmp.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            $obsIconBmp.EndInit()
+            $obsIconBmp.Freeze()
+        } catch { }
+
+        $m = New-Object System.Windows.Window
+        $m.Title = "OBS WebSocket"
+        $m.Width = 460
+        $m.SizeToContent = "Height"
+        $m.WindowStartupLocation = "CenterScreen"
+        $m.WindowStyle = "None"
+        $m.AllowsTransparency = $true
+        $m.ResizeMode = "NoResize"
+        $m.Topmost = $true
+        $m.Background = [Windows.Media.Brushes]::Transparent
+
+        $panel2 = $window.Resources['TableBgBrush']
+        $root = New-Object System.Windows.Controls.Border
+        $root.CornerRadius = New-Object System.Windows.CornerRadius(12)
+        $root.Background = $panel2
+        $root.BorderBrush = $window.Resources['LineBrush']
+        $root.BorderThickness = New-Object System.Windows.Thickness(1)
+        $root.Margin = New-Object System.Windows.Thickness(10)
+        $root.Padding = New-Object System.Windows.Thickness(24, 18, 24, 18)
+
+        $sp = New-Object System.Windows.Controls.StackPanel
+
+        # --- header: логотип OBS + заголовок + подзаголовок ---
+        $hdr = New-Object System.Windows.Controls.StackPanel
+        $hdr.Orientation = "Horizontal"
+        $hdr.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+        if ( $obsIconBmp -ne $null ) {
+            $im = New-Object System.Windows.Controls.Image
+            $im.Source = $obsIconBmp
+            $im.Width = 44; $im.Height = 44
+            $im.Margin = New-Object System.Windows.Thickness(0, 0, 14, 0)
+            $hdr.Children.Add($im) | Out-Null
+        }
+        $hsp = New-Object System.Windows.Controls.StackPanel
+        $h1 = New-Object System.Windows.Controls.TextBlock
+        $h1.Text = "OBS WebSocket"
+        $h1.FontSize = 18; $h1.FontWeight = "Bold"
+        $h1.Foreground = $window.Resources['TextBrush']
+        $h2 = New-Object System.Windows.Controls.TextBlock
+        $h2.Text = $L.ObsSubtitle
+        $h2.FontSize = 12
+        $h2.Foreground = $window.Resources['MutedBrush']
+        $h2.Margin = New-Object System.Windows.Thickness(0, 2, 0, 0)
+        $hsp.Children.Add($h1) | Out-Null
+        $hsp.Children.Add($h2) | Out-Null
+        $hdr.Children.Add($hsp) | Out-Null
+        $sp.Children.Add($hdr) | Out-Null
+
+        # --- описание: пароль должен совпадать с OBS ---
+        $desc = New-Object System.Windows.Controls.TextBlock
+        $desc.Text = ($L.ObsDesc -f $script:ObsPort)
+        $desc.TextWrapping = "Wrap"
+        $desc.FontSize = 13
+        $desc.Foreground = $window.Resources['TextBrush']
+        $desc.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+        $sp.Children.Add($desc) | Out-Null
+
+        # --- поля: Порт / Пароль ---
+        $fg = New-Object System.Windows.Controls.Grid
+        $fg.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+        $c0 = New-Object System.Windows.Controls.ColumnDefinition; $c0.Width = "Auto"
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+        $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = "Auto"
+        $c3 = New-Object System.Windows.Controls.ColumnDefinition; $c3.Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+        $fg.ColumnDefinitions.Add($c0) | Out-Null
+        $fg.ColumnDefinitions.Add($c1) | Out-Null
+        $fg.ColumnDefinitions.Add($c2) | Out-Null
+        $fg.ColumnDefinitions.Add($c3) | Out-Null
+        $lp = New-Object System.Windows.Controls.TextBlock
+        $lp.Text = $L.ObsPort; $lp.Foreground = $window.Resources['TextBrush']
+        $lp.VerticalAlignment = "Center"; $lp.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
+        [System.Windows.Controls.Grid]::SetColumn($lp, 0); $fg.Children.Add($lp) | Out-Null
+        $tbPort = New-Object System.Windows.Controls.TextBox
+        $tbPort.Text = [string]$script:ObsPort
+        $tbPort.Height = 32; $tbPort.FontSize = 13
+        $tbPort.Background = $window.Resources['AltRowBrush']
+        $tbPort.Foreground = $window.Resources['TextBrush']
+        $tbPort.BorderBrush = $window.Resources['LineBrush']
+        $tbPort.VerticalContentAlignment = "Center"
+        [System.Windows.Controls.Grid]::SetColumn($tbPort, 1); $fg.Children.Add($tbPort) | Out-Null
+        $lw = New-Object System.Windows.Controls.TextBlock
+        $lw.Text = $L.ObsPass; $lw.Foreground = $window.Resources['TextBrush']
+        $lw.VerticalAlignment = "Center"; $lw.Margin = New-Object System.Windows.Thickness(16, 0, 10, 0)
+        [System.Windows.Controls.Grid]::SetColumn($lw, 2); $fg.Children.Add($lw) | Out-Null
+        $tbPass = New-Object System.Windows.Controls.PasswordBox
+        $tbPass.Password = $script:ObsPass
+        $tbPass.Height = 32; $tbPass.FontSize = 13
+        $tbPass.Background = $window.Resources['AltRowBrush']
+        $tbPass.Foreground = $window.Resources['TextBrush']
+        $tbPass.BorderBrush = $window.Resources['LineBrush']
+        $tbPass.VerticalContentAlignment = "Center"
+        [System.Windows.Controls.Grid]::SetColumn($tbPass, 3); $fg.Children.Add($tbPass) | Out-Null
+        # v5.17.31.1: "глазик" (просьба юзера) - PasswordBox не умеет показывать
+        # символы, поэтому поверх него скрытый TextBox с тем же значением; клик по
+        # глазу переключает вид и синхронизирует значение в обе стороны
+        $c4 = New-Object System.Windows.Controls.ColumnDefinition; $c4.Width = "Auto"
+        $fg.ColumnDefinitions.Add($c4) | Out-Null
+        $tbPassText = New-Object System.Windows.Controls.TextBox
+        $tbPassText.Height = 32; $tbPassText.FontSize = 13
+        $tbPassText.Background = $window.Resources['AltRowBrush']
+        $tbPassText.Foreground = $window.Resources['TextBrush']
+        $tbPassText.BorderBrush = $window.Resources['LineBrush']
+        $tbPassText.VerticalContentAlignment = "Center"
+        $tbPassText.Visibility = "Collapsed"
+        [System.Windows.Controls.Grid]::SetColumn($tbPassText, 3); $fg.Children.Add($tbPassText) | Out-Null
+        $bEye = New-Object System.Windows.Controls.Button
+        $bEye.Content = [string][char]0xE7B3   # Segoe MDL2: RedEye
+        $bEye.FontFamily = "Segoe MDL2 Assets"
+        $bEye.FontSize = 14
+        $bEye.Width = 34; $bEye.Height = 32
+        $bEye.Margin = New-Object System.Windows.Thickness(6, 0, 0, 0)
+        $bEye.Foreground = $window.Resources['MutedBrush']
+        $bEye.Background = [Windows.Media.Brushes]::Transparent
+        $bEye.BorderBrush = [Windows.Media.Brushes]::Transparent
+        $bEye.Cursor = "Hand"
+        $bEye.ToolTip = $L.ObsEye
+        $bEye.Add_Click({ param($s, $e)
+            if ( $tbPass.Visibility -eq "Visible" ) {
+                $tbPassText.Text = $tbPass.Password
+                $tbPass.Visibility = "Collapsed"; $tbPassText.Visibility = "Visible"
+                $bEye.Content = [string][char]0xED1A   # Segoe MDL2: Hide
+            } else {
+                $tbPass.Password = $tbPassText.Text
+                $tbPassText.Visibility = "Collapsed"; $tbPass.Visibility = "Visible"
+                $bEye.Content = [string][char]0xE7B3
+            }
+        })
+        [System.Windows.Controls.Grid]::SetColumn($bEye, 4); $fg.Children.Add($bEye) | Out-Null
+        $sp.Children.Add($fg) | Out-Null
+
+        # --- "где посмотреть": кнопка-подсказка на всю ширину ---
+        # v5.17.31: "где посмотреть" - ТЕКСТ с подсказкой при наведении (не кнопка,
+        # решение юзера), подчёркнутый, мгновенный тултип
+        $bWhere = New-Object System.Windows.Controls.TextBlock
+        $bWhere.Text = $L.ObsWhere
+        $bWhere.FontSize = 12
+        $bWhere.Foreground = $window.Resources['MutedBrush']
+        $bWhere.Margin = New-Object System.Windows.Thickness(0, 0, 0, 14)
+        $bWhere.Cursor = "Hand"
+        $bWhere.TextDecorations = [System.Windows.TextDecorations]::Underline
+        $bWhere.ToolTip = $L.ObsWhereMsg
+        # v5.17.30.9h: ToolTipService - СТАТИЧЕСКИЙ класс: доступ через инстанс
+        # возвращает null и ронял ВЕСЬ хендлер (модалка не открывалась).
+        # namespace - System.Windows.CONTROLS (не System.Windows!)
+        [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($bWhere, 0)
+        [System.Windows.Controls.ToolTipService]::SetShowDuration($bWhere, 30000)
+        $sp.Children.Add($bWhere) | Out-Null
+
+        # --- кнопки Отмена / Сохранить (жёлтая) ---
+        $brow = New-Object System.Windows.Controls.StackPanel
+        $brow.Orientation = "Horizontal"
+        $brow.HorizontalAlignment = "Right"
+        $bCancel = New-Object System.Windows.Controls.Button
+        $bCancel.Content = $L.ObsCancel
+        $bCancel.Width = 110; $bCancel.Height = 34
+        $bCancel.Background = $window.Resources['PanelBrush']
+        $bCancel.Foreground = $window.Resources['TextBrush']
+        $bCancel.BorderBrush = $window.Resources['LineBrush']
+        $bCancel.Margin = New-Object System.Windows.Thickness(0, 0, 12, 0)
+        $bCancel.Cursor = "Hand"
+        $bCancel.Add_Click({ param($s, $e) $m.Close() })
+        $brow.Children.Add($bCancel) | Out-Null
+        $bSave = New-Object System.Windows.Controls.Button
+        $bSave.Content = $L.ObsSave
+        $bSave.Width = 140; $bSave.Height = 34
+        $bSave.Background = $window.Resources['StatusWarnBrush']
+        $bSave.Foreground = [Windows.Media.Brushes]::Black
+        $bSave.FontWeight = "Bold"
+        $bSave.Cursor = "Hand"
+        $brow.Children.Add($bSave) | Out-Null
+        $sp.Children.Add($brow) | Out-Null
+        $root.Child = $sp
+        $m.Content = $root
+
+        # v5.17.31.1: перетаскивание модалки (просьба юзера): тянуть за любую
+        # свободную область (шапка, текст, отступы). Поля и кнопки обрабатывают
+        # клик сами (e.Handled=true), поэтому DragMove им не мешает
+        $sp.Background = [Windows.Media.Brushes]::Transparent   # hit-test по всей площади
+        $root.Add_MouseLeftButtonDown({ param($s, $e)
+            try {
+                if ( $e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left ) { $m.DragMove() }
+            } catch { }
+        })
+
+        $bSave.Add_Click({
+            try {
+                $p2 = 0
+                try { $p2 = [int]$tbPort.Text.Trim() } catch { }
+                if ( $p2 -gt 0 -and $p2 -ne $script:ObsPort ) {
+                    $script:ObsPort = $p2
+                    [ObsWs]::Disconnect()
+                }
+                # v5.17.31.1: пароль может быть открыт глазом - читаем активное поле
+                if ( $tbPassText.Visibility -eq "Visible" ) { $pw2 = $tbPassText.Text } else { $pw2 = $tbPass.Password }
+                if ( $pw2 -ne $script:ObsPass ) {
+                    $script:ObsPass = $pw2
+                    [ObsWs]::Disconnect()
+                }
+                Save-Settings
+                Set-Status "OBS: connection settings saved"
+                Update-ObsButton
+                $m.Close()
+            } catch { }
+        })
+
+        $m.ShowDialog() | Out-Null
+    } catch {
+        # v5.17.30.9h-DEBUG: молчаливый catch маскировал причину "модалка не
+        # открывается" - пишем исключение в лог для диагностики
+        try {
+            $msg = "[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] ObsKey modal: " + $_.Exception.GetType().FullName + ": " + $_.Exception.Message + "`r`n" + $_.Exception.StackTrace + "`r`n---`r`n"
+            [System.IO.File]::AppendAllText((Join-Path $PSScriptRoot "obs-debug.log"), $msg)
+        } catch { }
+    }
+})
+function Update-ObsButton {
+    # Кнопка OBS: OBS не запущен -> disabled 'OBS ...'; запущен, но WS выключен ->
+    # disabled с подсказкой; подключено -> 'OBS REC' / красный 'OBS STOP'
+    try {
+        $L = $script:LocData[$script:Lang]
+        $obsRun = ( (Get-Process obs64 -ErrorAction SilentlyContinue) -ne $null )
+        if ( -not $obsRun ) {
+            $controls['BtnObsRec'].IsEnabled = $false
+            $controls['BtnObsRec'].Opacity = 0.45
+            $controls['TbObsRec'].Text = "OBS  ●  REC"
+            $controls['BtnObsRec'].ToolTip = $L.TipObsNotRun
+            $controls['BtnObsRec'].Background = $window.Resources['PanelBrush']
+        } elseif ( -not [ObsWs]::Connected ) {
+            $controls['BtnObsRec'].IsEnabled = $false
+            $controls['BtnObsRec'].Opacity = 0.45
+            $controls['TbObsRec'].Text = "OBS  ●  REC"
+            # v5.17.31: пароль не задан - подсказка про кнопку-ключ
+            if ( $script:ObsPass -eq "" ) {
+                $controls['BtnObsRec'].ToolTip = $L.TipObsNoPass
+            } else {
+                $controls['BtnObsRec'].ToolTip = $L.TipObsNoWs
+            }
+            $controls['BtnObsRec'].Background = $window.Resources['PanelBrush']
+        } elseif ( [ObsWs]::Recording ) {
+            # v5.17.31.3: REC гейтится правилами Play (репорт юзера: кнопка записи
+            # доступна раньше, чем можно запустить play - блокируем теми же
+            # условиями: игра на карте, кадры есть, карта кадров совпадает).
+            # Исключение: запись УЖЕ идёт - STOP должен оставаться доступным
+            # (в т.ч.manual stop при Playing)
+            $canStop = ( $script:Playing -or ($script:CurrentMap -ne "" -and -not ($script:KeyMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)) )
+            $controls['BtnObsRec'].IsEnabled = $canStop
+            $controls['BtnObsRec'].Opacity = $(if ( $canStop ) { 1.0 } else { 0.45 })
+            $controls['TbObsRec'].Text = "OBS  ■  STOP"
+            $controls['BtnObsRec'].ToolTip = $L.TipObsStop
+            $controls['BtnObsRec'].Background = "#E5484D"
+            $controls['BtnObsRec'].Foreground = "White"
+        } else {
+            # v5.17.31.3: старт записи = по смыслу то же, что Play: гейт теми же
+            # правилами, что у Play-кнопок (Update-SelectionButtons)
+            $wrong = ($script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)
+            $canPlay = ( $script:CurrentMap -ne "" -and $script:KeyRows -ne $null -and $script:KeyRows.Count -gt 0 -and -not $wrong )
+            $controls['BtnObsRec'].IsEnabled = $canPlay
+            $controls['BtnObsRec'].Opacity = $(if ( $canPlay ) { 1.0 } else { 0.45 })
+            $controls['TbObsRec'].Text = "OBS  ●  REC"
+            if ( -not $canPlay ) {
+                if ( $script:CurrentMap -eq "" ) { $controls['BtnObsRec'].ToolTip = $L.TipNoGame }
+                else { $controls['BtnObsRec'].ToolTip = $L.TipWrongMap }
+            } else {
+                $controls['BtnObsRec'].ToolTip = $L.TipObsStart
+            }
+            $controls['BtnObsRec'].Background = $window.Resources['PanelBrush']
+            $controls['BtnObsRec'].Foreground = $window.Resources['TextBrush']
+        }
+    } catch { }
+}
+$controls['BtnObsRec'].Add_Click({
+    # v5.17.31.2: Request теперь честный - false значит "сокет мёртв": статус
+    # "connection lost" + кнопка погаснет до переподключения (раньше писали
+    # "recording started" даже когда команда никуда не ушла)
+    try {
+        if ( -not [ObsWs]::Connected ) { return }
+        $ok = $false
+        if ( [ObsWs]::Recording ) {
+            $ok = [ObsWs]::Request("StopRecord")
+            if ( $ok ) { Set-Status "OBS: recording stopped" | Out-Null }
+        } else {
+            # v5.17.31.3: старт записи вне состояния "можно Play" запрещён
+            # (тот же гейт, что у кнопки в Update-ObsButton)
+            $wrong = ($script:KeyMap -ne "" -and $script:CurrentMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)
+            if ( $script:CurrentMap -eq "" -or $script:KeyRows -eq $null -or $script:KeyRows.Count -eq 0 -or $wrong ) { return }
+            $ok = [ObsWs]::Request("StartRecord")
+            if ( $ok ) { Set-Status "OBS: recording started" | Out-Null }
+        }
+        if ( -not $ok ) { Set-Status "OBS: connection lost - reconnecting" | Out-Null }
+        # v5.17.31.7: sleep+ping убраны - оптимистичный флаг в Request уже
+        # покрасил кнопку, ping-response не смешивается со свежим состоянием
+        Update-ObsButton
+    } catch { }
+})
 function Update-KeyMapGoButton {
     # подкнопка "вернуться к кадрам" под карточкой карты. Видна ТОЛЬКО когда кадры
     # в панели с другой карты, чем та, где сейчас игра (die-телепорт, переход-триггер).
@@ -2049,19 +2595,13 @@ function Test-WrongMap {
 }
 function Do-PathAdd {
     if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
-    # скорость кадра = поле fly speed: применяем её перед добавлением
-    # v5.17.30.5: Cam_MoveSpeed печатается ТОЛЬКО если скорость изменилась
-    # (повторные F8 на той же скорости - минус одна команда и ~0.6с печати;
-    # юзер: "F8 зависает на несколько секунд"). Скорость глобальная - не сбрасывается
-    $sp = $controls['TbSpeed'].Text.Trim()
-    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
+    # v5.17.30.9g: ТОЛЬКО PathAdd (решение юзера): скорость он меняет ОТДЕЛЬНО
+    # кнопкой "Set fly speed", кадр фиксирует ФАКТИЧЕСКУЮ скорость игры. Прежние
+    # варианты (всегда слать / слать при отличии) ломали это: перезаписывали
+    # скорость юзера или записывали не ту скорость при сбое движка. Дефолт поля
+    # Fly speed = 600 (дефолт игры) - панель и игра синхронны с запуска
     $script:StampNextSync = $true   # новый кадр получит время постановки
-    if ( $script:SpeedApplied -eq $sp ) {
-        $st = Send-GameCommands @("PathAdd")
-    } else {
-        $st = Send-GameCommands @("Cam_MoveSpeed $sp", "PathAdd")
-        $script:SpeedApplied = $sp
-    }
+    $st = Send-GameCommands @("PathAdd")
     Update-ParamBox "speed"
     Sync-AfterCommand $st
 }
@@ -2071,6 +2611,26 @@ $script:PlayWatch = $null
 function Set-Playing([bool]$p) {
     $script:Playing = $p
     $controls['BtnPathStop'].IsEnabled = $p
+    # v5.17.31.4: галочка "REC вместе с Play": запись стартует вместе с
+    # воспроизведением (если ещё не идёт) и заканчивается при его окончании.
+    # При выключенной галочке ручная запись не трогается (юзер мог начать
+    # её кнопкой REC для дублей - не наша задача её гасить)
+    if ( $p -and $script:ObsAutoRec -and [ObsWs]::Connected -and -not [ObsWs]::Recording ) {
+        if ( [ObsWs]::Request("StartRecord") ) { Set-Status "OBS: recording started with playback"; Update-ObsButton }
+    }
+    if ( -not $p -and $script:ObsAutoRec -and [ObsWs]::Recording ) {
+        # v5.17.31 (#5): воспроизведение кончилось - прекращаем съёмку (требование #5)
+        # v5.17.31.6: если сокет в этот момент мёртв/переподключается - НЕ теряем
+        # стоп: ObsStopPending доставит его сразу после восстановления связи
+        # (иначе запись в OBS продолжалась после конца кино)
+        if ( [ObsWs]::Connected -and [ObsWs]::Request("StopRecord") ) {
+            Set-Status "OBS: recording stopped (playback ended)"
+            Update-ObsButton   # v5.17.31.7: гасим кнопку тем же мгновением
+        } else {
+            $script:ObsStopPending = $true
+            Set-Status "OBS: connection lost - stop will be delivered after reconnect"
+        }
+    }
     Update-SelectionButtons   # v5.12: лочка кнопок на время воспроизведения
     if ( $p ) {
         $controls['BtnPathStop'].Background = "#E5484D"
@@ -2127,9 +2687,21 @@ function Do-PathPlay {
     # speed-driven playback: длительность сегментов = дистанция / скорость кадра
     # v5.17.14 (#8): Stop активен СРАЗУ, до ввода команд (команда печатается секунды)
     $controls['BtnPathStop'].IsEnabled = $true
+    $controls['BtnPathStop'].Background = "#E5484D"; $controls['BtnPathStop'].Foreground = "White"
+    # v5.17.31.5: PRE-ROLL старт записи ДО ввода команды. Раньше OBS включался из
+    # Set-Playing($true) - а та ждёт подтверждения ping'ом, и кино в игре уже шло
+    # 1-2с (репорт юзера: "кусок пропадает"). Экстра 1-2с статики в начале дубля
+    # режутся при монтаже, потерянный кусок - нет. Если команда не ушла - гасим
+    $obsPreRoll = $false
+    if ( $script:ObsAutoRec -and [ObsWs]::Connected -and -not [ObsWs]::Recording ) {
+        if ( [ObsWs]::Request("StartRecord") ) { $obsPreRoll = $true; Set-Status "OBS: recording (pre-roll)"; Update-ObsButton }
+    }
     $st = Send-GameCommand "PathPlaySpeed"
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback (Get-PathTotalDur) }
-    else { if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false } }
+    else {
+        if ( $obsPreRoll -and [ObsWs]::Recording ) { [void][ObsWs]::Request("StopRecord") }   # дубль не состоялся
+        if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false; $controls['BtnPathStop'].Background = $window.Resources['PanelBrush']; $controls['BtnPathStop'].Foreground = $window.Resources['TextBrush'] }
+    }
     Set-Status $st
 }
 function Do-PathPlayTime {
@@ -2146,9 +2718,18 @@ function Do-PathPlayTime {
     if ($sec -notmatch '^\d+(\.\d+)?$') { $sec = "15" }
     # v5.17.14 (#8): Stop активен СРАЗУ, до ввода команд
     $controls['BtnPathStop'].IsEnabled = $true
+    $controls['BtnPathStop'].Background = "#E5484D"; $controls['BtnPathStop'].Foreground = "White"
+    # v5.17.31.5: PRE-ROLL старт записи ДО ввода команды (см. Do-PathPlay)
+    $obsPreRoll = $false
+    if ( $script:ObsAutoRec -and [ObsWs]::Connected -and -not [ObsWs]::Recording ) {
+        if ( [ObsWs]::Request("StartRecord") ) { $obsPreRoll = $true; Set-Status "OBS: recording (pre-roll)"; Update-ObsButton }
+    }
     $st = Send-GameCommand "PathPlay $sec"
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback ([double]$sec) }
-    else { if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false } }
+    else {
+        if ( $obsPreRoll -and [ObsWs]::Recording ) { [void][ObsWs]::Request("StopRecord") }   # дубль не состоялся
+        if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false; $controls['BtnPathStop'].Background = $window.Resources['PanelBrush']; $controls['BtnPathStop'].Foreground = $window.Resources['TextBrush'] }
+    }
     Set-Status $st
 }
 # HideHud в игре - ПЕРЕКЛЮЧАТЕЛЬ; панель помнит состояние, кнопка одна и меняет подпись
@@ -2427,8 +3008,11 @@ function Find-VisualChildOfType($el, $t) {
     return $null
 }
 # FOV / Fly speed: зелёный фон = значение применено к игре, серый = редактируется (Set доступен только тогда)
+# FOV / Fly speed: зелёный фон = значение применено к игре, серый = редактируется (Set доступен только тогда)
+# v5.17.30.9h: SpeedApplied = "600" на старте - дефолт движка ПОДТВЕРЖДЁН живыми
+# кадрами (F8 без Cam_MoveSpeed писал 600), поле должно быть ЗЕЛЁНЫМ сразу
 $script:FovApplied = "90"
-$script:SpeedApplied = "500"
+$script:SpeedApplied = "600"
 function Set-ParamBoxState([string]$which) {
     # v5.17.7: ядро Update-ParamBox, вызывается и из Update-SelectionButtons -
     # иначе цикл PlayLock каждый раз ПЕРЕВКЛЮЧАЛ Set FOV / Set fly speed, даже когда
@@ -2631,6 +3215,10 @@ $script:EditingNow = $false
 $controls['DgKeys'].Add_CellEditEnding({
     param($sender, $e)
     try {
+        # v5.17.30.9h: коммит ТОЛЬКО при Commit-действии (Escape = Cancel - команды
+        # не слать). И сразу Sync-AfterCommand - таблица обновлялась только через
+        # полл ~5.4с (юзер: "значение не обновилось после правки FOV")
+        if ( $e.Action -ne [System.Windows.Controls.DataGridEditAction]::Commit ) { return }
         $row = $e.Row.Item
         if ( $row -eq $null ) { return }
         $n = $row.Num
@@ -2656,6 +3244,7 @@ $controls['DgKeys'].Add_CellEditEnding({
                     $sv = [int][math]::Round([double]$val)
                     Send-GameCommands @("SpeedIdx $n","SpeedVal $sv","SpeedApply") | Out-Null
                 }
+                Sync-AfterCommand ""
             } catch { }
         }) | Out-Null
     } catch { }
@@ -3790,6 +4379,13 @@ $script:SpinManual = $false
 $script:SpinAngle = 0
 $script:GamePoll = 0
 $script:PollInGame = 0
+# v5.17.31 (#5): OBS WebSocket - состояние и опрос каждые ~1.8с (20 тиков по 90мс)
+$script:ObsPort = 4455
+$script:ObsPass = ""
+$script:ObsAutoRec = $false   # v5.17.31.4: REC с Play (галочка CbObsAuto)
+$script:ObsStopPending = $false   # v5.17.31.6: stop, не доставленный в конце кино
+$script:ObsPoll = 0
+$script:ObsSeenRunning = $false
 $script:UiTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:UiTimer.Interval = [TimeSpan]::FromMilliseconds(90)
 $script:UiTimer.Add_Tick({
@@ -3851,6 +4447,34 @@ $script:UiTimer.Add_Tick({
             if ( $script:PollInGame -eq 0 ) { Sync-FromLog -Force } else { Sync-FromLog }
         }
     }
+    # v5.17.31 (#5): OBS WebSocket - опрос каждые ~1.8с: коннект к запущенному OBS,
+    # актуализация кнопки REC, чтение статуса записи (штатные нажатия в OBS тоже
+    # подхватываются через событие RecordStateChanged)
+    $script:ObsPoll = ($script:ObsPoll + 1) % 20
+    if ( $script:ObsPoll -eq 0 ) {
+        try {
+            $obsRun = ( (Get-Process obs64 -ErrorAction SilentlyContinue) -ne $null )
+            if ( $obsRun -and -not [ObsWs]::Connected ) {
+                [ObsWs]::Connect('127.0.0.1', $script:ObsPort, $script:ObsPass)
+            }
+            # v5.17.31.6: ping КАЖДЫЙ тик (а не только при !Recording): раньше
+            # единственным корректором Recording было событие RecordStateChanged -
+            # одно пропущенное событие = вечный красный STOP после конца кино
+            # (репорт юзера). Ответ GetRecordStatus парсится в ParseMsg и чинит
+            # флаг в обе стороны максимум за ~2с
+            if ( [ObsWs]::Connected ) { [void][ObsWs]::GetRecordStatus() }
+            # v5.17.31.6: стоп, не доставленный в момент конца воспроизведения
+            # (сокет перезапускался), доставляем сразу после переподключения
+            if ( $script:ObsStopPending -and [ObsWs]::Connected ) {
+                if ( [ObsWs]::Recording ) {
+                    if ( [ObsWs]::Request("StopRecord") ) { $script:ObsStopPending = $false; Set-Status "OBS: recording stopped (playback ended)" }
+                } else {
+                    $script:ObsStopPending = $false   # запись уже не идёт - нечего гасить
+                }
+            }
+        } catch { }
+        try { Update-ObsButton } catch { }
+    }
 })
 $script:UiTimer.Start()
 
@@ -3897,6 +4521,27 @@ $script:LocData = @{
         PushKeysQ = "Keyframes restored in the table, but the in-game path is empty after the map load.`nWrite {0} keyframes into the game now?"
         PushKeysTitle = "Restore path"
         PushKeysNo = "keyframes are in the table - use Import from file to write them into the game"
+        TipObsNotRun = "OBS is not running"
+        TipObsNoWs = "Enable the OBS WebSocket server: Tools -> WebSocket Server Settings -> Enable (port 4455)"
+        TipObsStart = "Start recording the current OBS scene"
+        TipObsStop = "Stop OBS recording"
+        ObsSubtitle = "Connection setup"
+        ObsDesc = "Enter the OBS WebSocket server password. It must match the password in OBS Studio settings (default port: {0})."
+        ObsPort = "Port"
+        ObsPass = "Password"
+        ObsWhere = "Where to find the port and password in OBS?"
+        ObsWhereMsg = "In OBS: Tools -> WebSocket Server Settings. The port and password are configured there."
+        ObsCancel = "Cancel"
+        ObsSave = "Save"
+        ObsEye = "Show or hide the password"
+        ObsAuto = "REC with Play"
+        ObsAutoTip = "Start OBS recording when playback starts, stop it when playback ends"
+        TipObsKey = "Set the OBS WebSocket password (same as in OBS: Tools -> WebSocket Server Settings)"
+        TipObsNoPass = "OBS WebSocket needs a password: set it in OBS (Tools -> WebSocket Server Settings) and here via the key button"
+        TipObsInfo = "OBS setup:`n1) Tools -> WebSocket Server Settings`n2) Enable WebSocket server, port 4455`n3) Set the same password (6+ chars) in OBS and in the panel via the key button`nThe REC button activates automatically."
+        ObsPassQ = "OBS WebSocket password (must match the password in OBS):"
+        ObsPassTitle = "OBS password"
+        TipObsInfoRu = "Настройка OBS:`n1) Сервис -> Настройки сервера WebSocket`n2) Включить сервер WebSocket, порт 4455`n3) Задай пароль (6+ символов) и впиши его в settings.json как obspass`nКнопка REC активируется сама."
         LoadMapQ = "This file is for map '{0}', but '{1}' is loaded.`nLoad '{0}' and import?"
         LoadMapTitle = "Different map"
     }
@@ -3941,6 +4586,26 @@ $script:LocData = @{
         PushKeysQ = "Кадры восстановлены в таблице, но путь в игре пуст после загрузки карты.`nЗаписать {0} кадров в игру сейчас?"
         PushKeysTitle = "Восстановить путь"
         PushKeysNo = "кадры в таблице - для записи в игру используйте Импорт из файла"
+        TipObsNotRun = "OBS не запущен"
+        TipObsNoWs = "Включите сервер WebSocket в OBS: Tools -> WebSocket Server Settings -> Enable (порт 4455)"
+        TipObsStart = "Начать запись текущей сцены OBS"
+        TipObsStop = "Остановить запись OBS"
+        ObsSubtitle = "Настройка подключения"
+        ObsDesc = "Введите пароль сервера OBS WebSocket. Он должен совпадать с паролем в настройках OBS Studio (порт по умолчанию: {0})."
+        ObsPort = "Порт"
+        ObsPass = "Пароль"
+        ObsWhere = "Где посмотреть порт и пароль в OBS?"
+        ObsWhereMsg = "В OBS: Сервис -> Настройки сервера WebSocket. Там же настраиваются порт и пароль."
+        ObsCancel = "Отмена"
+        ObsSave = "Сохранить"
+        ObsEye = "Показать или скрыть пароль"
+        ObsAuto = "REC вместе с Play"
+        ObsAutoTip = "Запись OBS стартует вместе с воспроизведением и заканчивается при его окончании"
+        TipObsKey = "Задать пароль OBS WebSocket (тот же, что в OBS: Сервис -> Настройки сервера WebSocket)"
+        TipObsNoPass = "OBS WebSocket требует пароль: задай его в OBS (Сервис -> Настройки сервера WebSocket) и здесь кнопкой с ключом"
+        TipObsInfo = "Настройка OBS:`n1) Сервис -> Настройки сервера WebSocket`n2) Включить сервер WebSocket, порт 4455`n3) Один и тот же пароль (6+ символов) в OBS и в панели кнопкой с ключом`nКнопка REC активируется сама."
+        ObsPassQ = "Пароль OBS WebSocket (должен совпадать с паролем в OBS):"
+        ObsPassTitle = "Пароль OBS"
         LoadMapQ = "Файл для карты '{0}', сейчас запущена '{1}'.`nЗагрузить '{0}' и импортировать?"
         LoadMapTitle = "Другая карта"
     }
@@ -3983,6 +4648,12 @@ function Set-Lang([string]$lang) {
     # подсказки на серых кнопках
     foreach ( $b in @('BtnFovKey','BtnKeySpeed') ) { $controls[$b].ToolTip = $L.TipSelect }
     foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
+    # v5.17.31 (#5): инструкция настройки OBS на кнопке "i" + тултип кнопки-ключа
+    $controls['BtnObsInfo'].ToolTip = $L.TipObsInfo
+    $controls['BtnObsKey'].ToolTip = $L.TipObsKey
+    # v5.17.31.4: чекбокс авто-записи "REC вместе с Play"
+    $controls['CbObsAuto'].Content = $L.ObsAuto
+    $controls['CbObsAuto'].ToolTip = $L.ObsAutoTip
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
     $controls['FlagRU'].Visibility = if ( $lang -eq "ru" ) { "Visible" } else { "Collapsed" }
     Save-Settings
@@ -4012,7 +4683,7 @@ $script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
 $script:FavMaps = New-Object System.Collections.Generic.List[string]
 function Save-Settings {
     try {
-        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir } |
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec } |
             ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
 }
@@ -4029,9 +4700,25 @@ try {
     if ( $s.mapsdir -ne $null -and $s.mapsdir -ne "" -and (Test-Path ([string]$s.mapsdir)) ) {
         $script:MapsDir = [string]$s.mapsdir
     }
+    # v5.17.31 (#5): OBS WebSocket - порт и пароль (включается в OBS: Tools ->
+    # WebSocket Server Settings)
+    if ( $s.obsport -ne $null -and [int]$s.obsport -gt 0 ) { $script:ObsPort = [int]$s.obsport }
+    if ( $s.obspass -ne $null ) { $script:ObsPass = [string]$s.obspass }
+    # v5.17.31.4: галочка "REC вместе с Play"
+    if ( $s.obsautorec -ne $null ) { $script:ObsAutoRec = ($s.obsautorec -eq $true) }
 } catch { }
 Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
+
+# v5.17.31.4: чекбокс "REC вместе с Play" - восстановление состояния + сохранение
+try {
+    $controls['CbObsAuto'].IsChecked = $script:ObsAutoRec
+    $controls['CbObsAuto'].Add_Click({
+        $script:ObsAutoRec = ($controls['CbObsAuto'].IsChecked -eq $true)
+        Save-Settings
+        Set-Status $(if ( $script:ObsAutoRec ) { "OBS: recording will follow Play" } else { "OBS: manual recording only" })
+    })
+} catch { }
 
 # ---------- owl icon ----------
 # v5.13: стрелка обновления - глиф "Refresh" из Segoe MDL2 + СВЕЖИЙ unfrozen-трансформ.
@@ -4056,6 +4743,20 @@ if ( Test-Path $owlPath ) {
         $bmp.EndInit()
         $bmp.Freeze()
         $controls['ImgOwl'].Source = $bmp
+    } catch { }
+}
+
+# v5.17.31 (#5): настоящий логотип OBS (извлечён из obs64.exe, Panel/obs-icon.png)
+$obsIconPath = Join-Path $PSScriptRoot "obs-icon.png"
+if ( Test-Path $obsIconPath ) {
+    try {
+        $bmpO = New-Object Windows.Media.Imaging.BitmapImage
+        $bmpO.BeginInit()
+        $bmpO.UriSource = (New-Object Uri($obsIconPath))
+        $bmpO.CacheOption = [Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $bmpO.EndInit()
+        $bmpO.Freeze()
+        $controls['ImgObsLogo'].Source = $bmpO
     } catch { }
 }
 

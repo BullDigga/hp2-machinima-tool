@@ -2,3 +2,13 @@
 "*.uc.bak"  
 Src/HP2UScriptDecompile/  
 ucc-make.log  
+
+# panel runtime artifacts (local only)
+Panel/settings.json
+Panel/obs-debug.log
+Panel/panel-run.log
+Panel/crash.log
+Panel/scan-cache.json
+Panel/keyframes-backup.hp2path
+Panel/restore.hp2path
+Tools/*.png
