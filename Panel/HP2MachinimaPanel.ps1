@@ -3645,8 +3645,8 @@ $script:LaunchTimer.Add_Tick({
 })
 
 function Build-MapRows {
-    # v5.17.24: СЃС‚СЂРѕРєРё РїРёРєРµСЂР° РІ СЃС‚РёР»Рµ СЂРµС„РµСЂРµРЅСЃР° - РїСЂРµРІСЊСЋ, РёРјСЏ + Р±РµР№РґР¶ РєР°С‚РµРіРѕСЂРёРё +
-    # С‚РµС….РёРјСЏ, Р·РІРµР·РґР°, Launch. РўРµРјР° - С‡РµСЂРµР· СЂРµСЃСѓСЂСЃС‹ РіР»Р°РІРЅРѕРіРѕ РѕРєРЅР°
+    # v5.17.24: строки пикера в стиле референса - превью, имя + бейдж категории +
+    # тех.имя, звезда, Launch. Тема - через ресурсы главного окна
     param($listPanel, $allMaps, $filter, $favOnly)
     $listPanel.Children.Clear()
     $f = ""
@@ -3671,7 +3671,7 @@ function Build-MapRows {
         $cs = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
         $cl = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
         $g2.ColumnDefinitions.Add($gc); $g2.ColumnDefinitions.Add($cn); $g2.ColumnDefinitions.Add($cs); $g2.ColumnDefinitions.Add($cl)
-        # РїСЂРµРІСЊСЋ / NO PREVIEW
+        # превью / NO PREVIEW
         $thumb = $script:ThumbsDir + "\" + $m + ".bmp"
         if ( Test-Path $thumb ) {
             $img = New-Object System.Windows.Controls.Image
@@ -3698,7 +3698,7 @@ function Build-MapRows {
             [System.Windows.Controls.Grid]::SetColumn($ph, 0)
             $g2.Children.Add($ph) | Out-Null
         }
-        # РёРјСЏ + Р±РµР№РґР¶ РєР°С‚РµРіРѕСЂРёРё + С‚РµС….РёРјСЏ
+        # имя + бейдж категории + тех.имя
         $np = New-Object System.Windows.Controls.StackPanel
         $np.Margin = [System.Windows.Thickness]::new(12,0,8,0)
         $np.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
@@ -3729,7 +3729,7 @@ function Build-MapRows {
         [void]$np.Children.Add($tbT)
         [System.Windows.Controls.Grid]::SetColumn($np, 1)
         $g2.Children.Add($np) | Out-Null
-        # Р·РІРµР·РґР° РёР·Р±СЂР°РЅРЅРѕРіРѕ
+        # звезда избранного
         $isFav = $script:FavMaps -contains $m
         $star = New-Object System.Windows.Controls.Button
         if ( $isFav ) { $star.Content = [string][char]0xE735 } else { $star.Content = [string][char]0xE734 }
@@ -3791,7 +3791,7 @@ function Build-MapRows {
         $trgOver.ExitActions.Add($bsbOut)
         $tplStar.Triggers.Add($trgOver)
         $star.Template = $tplStar
-        $star.ToolTip = $(if ( $script:Lang -eq "ru" ) { "Р’ РёР·Р±СЂР°РЅРЅРѕРµ" } else { "Favorite" })
+        $star.ToolTip = $(if ( $script:Lang -eq "ru" ) { "В избранное" } else { "Favorite" })
         $star.Tag = $m
         $star.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
         $star.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
@@ -3810,7 +3810,7 @@ function Build-MapRows {
         $g2.Children.Add($star) | Out-Null
         # Launch
         $ln = New-Object System.Windows.Controls.Button
-        $ln.Content = "в–¶  Launch"
+        $ln.Content = "▶  Launch"
         $ln.Height = 40
         $ln.FontSize = 13
         $ln.FontWeight = [System.Windows.FontWeights]::Bold
@@ -3841,7 +3841,7 @@ function Update-MapCounter {
     } catch { }
 }
 function Show-MapPicker {
-    # v5.17.24: РїРёРєРµСЂ РєР°СЂС‚ РІ СЃС‚РёР»Рµ СЂРµС„РµСЂРµРЅСЃР°, С‚РµРјР° С‡РµСЂРµР· СЂРµСЃСѓСЂСЃС‹ РіР»Р°РІРЅРѕРіРѕ РѕРєРЅР°
+    # v5.17.24: пикер карт в стиле референса, тема через ресурсы главного окна
     try {
         if ( -not (Test-Path $script:MapsDir) ) { Set-Status "maps folder not found"; return }
         $maps = @(Get-ChildItem -Path $script:MapsDir -Filter "*.unr" -ErrorAction SilentlyContinue |
@@ -3852,7 +3852,7 @@ function Show-MapPicker {
         $ru = ( $script:Lang -eq "ru" )
 
         $win2 = New-Object System.Windows.Window
-        $win2.Title = "HP2 - " + $(if ( $ru ) { "Р’С‹Р±РѕСЂ РєР°СЂС‚С‹" } else { "Map Selector" })
+        $win2.Title = "HP2 - " + $(if ( $ru ) { "Выбор карты" } else { "Map Selector" })
         $win2.Width = 1060; $win2.Height = 920
         $win2.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
         # v5.17.25: Left/Top главного окна бывают NaN (окно ещё не показано) -
@@ -3884,7 +3884,7 @@ function Show-MapPicker {
         $root2.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::Auto}))
         $root2.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}))
 
-        # С…РµРґРµСЂ: Р·Р°РіРѕР»РѕРІРѕРє + РїРѕРёСЃРє + РІРєР»Р°РґРєРё
+        # хедер: заголовок + поиск + вкладки
         $hdr = New-Object System.Windows.Controls.Grid
         $hdr.Margin = [System.Windows.Thickness]::new(0,0,0,10)
         [System.Windows.Controls.Grid]::SetRow($hdr, 0)
@@ -3894,7 +3894,7 @@ function Show-MapPicker {
         $h4 = New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::Auto}
         $hdr.ColumnDefinitions.Add($h1); $hdr.ColumnDefinitions.Add($h2); $hdr.ColumnDefinitions.Add($h3); $hdr.ColumnDefinitions.Add($h4)
         $ttl = New-Object System.Windows.Controls.TextBlock
-        $ttl.Text = $(if ( $ru ) { "Р’С‹Р±РѕСЂ РєР°СЂС‚С‹" } else { "Map Selector" })
+        $ttl.Text = $(if ( $ru ) { "Выбор карты" } else { "Map Selector" })
         $ttl.FontSize = 20
         $ttl.FontWeight = [System.Windows.FontWeights]::Bold
         $ttl.Foreground = $window.Resources['TextBrush']
@@ -3913,7 +3913,7 @@ function Show-MapPicker {
         $tabs.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
         [System.Windows.Controls.Grid]::SetColumn($tabs, 2)
         $tabAll = New-Object System.Windows.Controls.Button
-        $tabAll.Content = $(if ( $ru ) { "Р’СЃРµ РєР°СЂС‚С‹" } else { "All Maps" })
+        $tabAll.Content = $(if ( $ru ) { "Все карты" } else { "All Maps" })
         $tabAll.Height = 34
         $tabAll.Padding = [System.Windows.Thickness]::new(12,4,12,4)
         $tabAll.FontWeight = [System.Windows.FontWeights]::Bold
@@ -3921,7 +3921,7 @@ function Show-MapPicker {
         $tabAll.Tag = "all"
         [void]$tabs.Children.Add($tabAll)
         $tabFav = New-Object System.Windows.Controls.Button
-        $tabFav.Content = [string][char]0xE735 + "  " + $(if ( $ru ) { "РР·Р±СЂР°РЅРЅРѕРµ" } else { "Favorites" })
+        $tabFav.Content = [string][char]0xE735 + "  " + $(if ( $ru ) { "Избранное" } else { "Favorites" })
         $tabFav.FontFamily = New-Object System.Windows.Media.FontFamily("Consolas")
         $tabFav.Height = 34
         $tabFav.Padding = [System.Windows.Thickness]::new(12,4,12,4)
@@ -3965,14 +3965,14 @@ function Show-MapPicker {
         $hdr.Children.Add($btnDir) | Out-Null
         $root2.Children.Add($hdr) | Out-Null
 
-        # СЃС‡С‘С‚С‡РёРє
+        # счётчик
         $script:MPCounter = New-Object System.Windows.Controls.TextBlock
         $script:MPCounter.Foreground = $window.Resources['MutedBrush']
         $script:MPCounter.Margin = [System.Windows.Thickness]::new(0,0,0,8)
         [System.Windows.Controls.Grid]::SetRow($script:MPCounter, 1)
         $root2.Children.Add($script:MPCounter) | Out-Null
 
-        # СЃРїРёСЃРѕРє
+        # список
         $sv = New-Object System.Windows.Controls.ScrollViewer
         $sv.VerticalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
         [System.Windows.Controls.Grid]::SetRow($sv, 2)
@@ -3980,7 +3980,7 @@ function Show-MapPicker {
         $list = New-Object System.Windows.Controls.StackPanel
         $sv.Content = $list
 
-        # Р·Р°РјС‹РєР°РЅРёСЏ - С‚РѕР»СЊРєРѕ script:!
+        # замыкания - только script:!
         $script:MPWin = $win2
         $script:MPList = $list
         $script:MPSearch = $search
@@ -4015,7 +4015,7 @@ function Show-MapPicker {
             } catch { }
         })
 
-        # Р°РєС‚РёРІРЅР°СЏ РІРєР»Р°РґРєР° РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ - All
+        # активная вкладка по умолчанию - All
         $tabAll.Background = $window.Resources['StatusWarnBrush']
         $tabAll.Foreground = [System.Windows.Media.Brushes]::Black
         Build-MapRows -listPanel $list -allMaps $maps -filter "" -favOnly $false
