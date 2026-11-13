@@ -60,6 +60,13 @@ public static class GameCtl {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
 
+    // v5.17.32.14: фокус-чек по PID - хэндл вьюпорта игры МЕНЯЕТСЯ, когда
+    // UWindow-root активируется открытием консоли (старый $h сравнивался с
+    // новым foreground = ложный "FOCUS LOST" посреди пачки: PathPing не
+    // допечатывался и терминал оставался открытым)
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+
     [DllImport("user32.dll")]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
@@ -402,7 +409,13 @@ function Wait-Pump([int]$ms) {
     }
 }
 
-function Type-Command([string]$cmd, [IntPtr]$hGame) {
+# v5.17.32.13: трассировка ввода - что панель ОТПРАВИЛА (символы, ensure-open,
+# Enter) пишется в obs-debug.log; при сбое терминала сравниваем с CNST/PATHEV
+# со стороны игры (дамп Tools/dump-echo.ps1)
+function Trace-Type([string]$msg) {
+    try { [System.IO.File]::AppendAllText((Join-Path $PSScriptRoot "obs-debug.log"), (Get-Date -Format "HH:mm:ss.fff") + " TYPE: " + $msg + "`r`n") } catch { }
+}
+function Type-Command([string]$cmd, [IntPtr]$hGame = [IntPtr]::Zero) {
     # unicode-ввод: не зависит от раскладки клавиатуры.
     # v5.17.2: 20мс/символ и 260мс после Enter - при быстрой печати длинных пачек команд
     # (импорт) консоль теряла символы и Enters, значения кадров мутировали
@@ -418,9 +431,16 @@ function Type-Command([string]$cmd, [IntPtr]$hGame) {
     # утечки сужено до одного символа/20мс) и БЕЗ рефокуса - юзер сознательно
     # ушёл Alt-Tab'ом, выдёргивать его обратно нельзя. Родительский цикл видит
     # SendFocusLost и прерывает пачку
+    Trace-Type ("typed '" + $cmd + "'")
     foreach ($ch in $cmd.ToCharArray()) {
-        if ( [GameCtl]::GetForegroundWindow() -ne $hGame ) {
+        # v5.17.32.14: фокус-чек по PID процесса игры (хэндл вьюпорта устаревает
+        # после открытия консоли - UWindow пересоздаёт окно)
+        $fg = [GameCtl]::GetForegroundWindow()
+        $fgPid = [uint32]0
+        [void][GameCtl]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+        if ( $fgPid -ne $script:GameFocusPid ) {
             $script:SendFocusLost = $true
+            Trace-Type ("FOCUS LOST mid-command at '" + $cmd + "' (fg pid $fgPid)")
             return
         }
         [GameCtl]::TapChar($ch)
@@ -533,6 +553,9 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
             Stop-Spin
             return "game is not on a level (no viewport window) - typing skipped"
         }
+        # v5.17.32.14: PID игры для фокус-чека по процессу (хэндл меняется при
+        # открытии консоли - UWindow пересоздаёт вьюпорт)
+        try { $script:GameFocusPid = (Get-Process Game -ErrorAction SilentlyContinue).Id } catch { }
         if ( -not (Focus-GameWindow $h) ) { Stop-Spin; return "could not focus the game - click the game window once" }
         # v5.13: ОТКРЫТИЕ консоли панелью - Shift+` (тихая ветка KeyEvent, окно за экраном).
         # Обычный ` остаётся терминалом пользователя.
@@ -544,13 +567,33 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
         # командой => 'Unrecognized command'. ТРОЙНОЙ тап усугублял хаос (три toggle).
         # Новый надёжный профиль: Shift down -> 300мс (движок обязан обработать
         # Shift-Press за 18 тиков) -> grave -> Shift up -> 200мс. ОДИН тап вместо
-        # трёх: быстрее (0.65с вместо 1.05с) и без toggle-хаоса
-        [GameCtl]::KeyDown([uint16]0x10)
-        Wait-Pump 250
-        [GameCtl]::Tap([uint16]$VK['grave'])
-        Wait-Pump 150
-        [GameCtl]::KeyUp([uint16]0x10)
-        Wait-Pump 120
+        # трёх: быстрее (0.65с вместо 1.05с) и без toggle-хаоса.
+        # v5.17.32.3 (#1): если терминал УЖЕ открыт (CNST|OPEN от игры) - пропускаем
+        # ensure-open: Shift+grave ЗАКРЫЛ БЫ открытый юзером терминал, и команды
+        # ушли бы в никуда. Печатаем сразу в открытую строку ввода
+        if ( -not $SkipOpen -and -not $script:ConsoleOpen ) {
+            # v5.17.32.3: пропускаем ensure-open если: 1) -SkipOpen (досылка PathPing,
+            # v5.17.30.9d - СВИТЧ БЫЛ МЁРТВ: нигде не проверялся, каждая досылка
+            # ОТКРЫВАЛА закрытый терминал заново и печатала PathPing в него -
+            # репорт юзера "открывается и пишется PathPing"); 2) терминал УЖЕ
+            # открыт (CNST|OPEN от игры, Shift+grave закрыл бы его)
+            Trace-Type "ensure-open: shift+grave+backspace (flag closed)"
+            [GameCtl]::KeyDown([uint16]0x10)
+            Wait-Pump 250
+            [GameCtl]::Tap([uint16]$VK['grave'])
+            Wait-Pump 150
+            [GameCtl]::KeyUp([uint16]0x10)
+            Wait-Pump 120
+            # v5.17.32.5: СИМВОЛЬНЫЙ ГОН терминала (скрин терминала юзера:
+            # '> ~PathPlaySpeed / Unrecognized command'): Shift ещё зажат при
+            # открытии консоли, и символ shift+grave ('~') просыпается в СТРОКЕ
+            # ВВОДА уже открытого терминала - команда уходит как '~PathPlaySpeed'
+            # -> Unrecognized (кино не стартует; терминал не закрывается по F9).
+            # Детерминированная чистка: один Backspace по открытой строке -
+            # стирает slipped '~', пустой строке безвреден
+            [GameCtl]::Tap([uint16]0x08)
+            Wait-Pump 80
+        }
         # v5.17.8: прогресс [i/N] с бегущими точками + проверка фокуса ПЕРЕД КАЖДОЙ командой.
         # Alt-Tab во время пачки (импорт) печатал остаток команд в ЧУЖОЕ окно, а консоль игры
         # оставалась открытой (чёрный экран). Теперь: фокус потерян -> один тихий рефокус,
@@ -581,6 +624,7 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
                 break
             }
             [GameCtl]::Tap([uint16]$VK['enter'])
+            Trace-Type ("Enter after '" + $c + "'")
             Wait-Pump 260
             $ci++
         }
@@ -593,9 +637,15 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
         # v5.17.8: консоль закрывает ИГРА изнутри по команде-маркеру PathPing (см. HPConsole).
         # Старый финальный grave-тап был тогглом: человеческий ` во время печати инвертировал
         # состояние консоли, и следующая пачка уходила в геймплей.
-        Type-Command "PathPing"
+        Trace-Type "sending PathPing (batch close)"
+        Type-Command "PathPing" $h
+        Trace-Type "PathPing typed"
         [GameCtl]::Tap([uint16]$VK['enter'])
+        Trace-Type "Enter after PathPing"
         Wait-Pump 260
+        # v5.17.32.3: PathPing закрывает терминал БЕЗУСЛОВНО (игровой патч
+        # HideConsole) - флаг сразу false, не дожидаясь скана CNST|CLOSE
+        $script:ConsoleOpen = $false
         # v5.17.30.9: grave-финал ОТМЕНЁН - живой тест показал: после PathPing
         # (HideConsole -> bShowConsole=false) grave проходит ветку "открыть" и
         # ОТКРЫВАЕТ терминал ВИДИМО в углу (10,10) - юзер видел открытое окно
@@ -655,6 +705,15 @@ $script:SawClearInBuffer = $false
 # v5.17.30.9: число PING-событий в последнем распарсенном скане - детекция потери
 # закрывающего PathPing (если после команды PING не пришёл - консоль не закрылась)
 $script:LastSyncPingCount = 0
+# v5.17.32.11: число ADD-событий в последнем скане - верификация PathAdd
+$script:LastSyncAddCount = 0
+# v5.17.32.12: ADD-счётчик на момент армирования штампа времени - штамп "сгорает"
+# ТОЛЬКО когда новый ADD реально доехал до скана (раньше первый же синк сбрасывал
+# StampNextSync ДО прибытия события: кадр вставал, время терялось - репорт юзера)
+$script:StampArmAddCount = -1
+# v5.17.32.3 (#1): терминал открыт? (CNST-события от игры; без патча игры флаг
+# остаётся false = панель работает как раньше, ensure-open всегда)
+$script:ConsoleOpen = $false
 $script:KeyMap = ""       # v5.14: карта, которой принадлежат кадры в таблице
 $script:LastGen = -1      # v5.16: поколение лога (меняется на каждой загрузке уровня)
 # времена постановки кадров переживают перезапуск панели (файл рядом со скриптом)
@@ -814,10 +873,28 @@ function Sync-FromLog([switch]$Force) {
         $Force = $true
     }
     # защита от зависшего скана на ТОМ ЖЕ pid (процесс умер посреди чтения памяти)
+    # v5.17.32.17: страж учитывает AsyncState. Полный скан ДЛИТСЯ дольше 20с, когда
+    # память игры выросла за время игры - прежний безусловный сброс SyncBusy на
+    # 20-й секунде вешал StartAsync-гвард (AsyncState=1, старый скан ещё бежит),
+    # SyncBusy повторно вешался с НИКАКИМ активным сканом - вечный отравленный
+    # цикл: таблица/статус замирали навсегда (репорт юзера "команды не доходят")
     if ( $script:SyncBusy ) {
-        if ( $script:SyncStartedAt -ne $null -and ((Get-Date) - $script:SyncStartedAt).TotalSeconds -gt 20 ) {
+        if ( [MemScanPanel]::AsyncState -eq 1 ) {
+            # скан реально бежит (длинный полный) - ждём его завершения.
+            # v5.17.32.17: жёсткий сброс ТОЛЬКО для совсем зависшего потока (120с)
+            if ( $script:ScanStartedAt -ne $null -and ((Get-Date) - $script:ScanStartedAt).TotalSeconds -gt 120 ) {
+                [MemScanPanel]::AsyncState = 0
+                $script:SyncBusy = $false
+                $script:ScanStartedAt = Get-Date
+                $Force = $true
+            } else { return $false }
+        }
+        elseif ( $script:SyncStartedAt -ne $null -and ((Get-Date) - $script:SyncStartedAt).TotalSeconds -gt 20 ) {
             $script:SyncBusy = $false
             $Force = $true
+        } elseif ( [MemScanPanel]::AsyncState -eq 2 ) {
+            # скан завершился, но Complete ещё не прогнался на тике - ждём тик
+            return $false
         } else { return $false }
     }
     $lf = Find-LogFile
@@ -844,6 +921,7 @@ function Sync-FromLog([switch]$Force) {
     $script:LastScanFast = ($pairs -ne $null)
     $script:SyncBusy = $true
     $script:SyncStartedAt = Get-Date
+    $script:ScanStartedAt = Get-Date   # v5.17.32.17: для жёсткого сброса зависшего скана
     $script:SyncForce = [bool]$Force
     Start-Spin
     [MemScanPanel]::StartAsync($gp.Id, $pairs)
@@ -1034,7 +1112,15 @@ function Complete-SyncFromLogInner {
                 }
             }
         }
-        $ev = @($ev | Sort-Object -Property Seq -Unique)
+        # v5.17.32.10: дедуп КАЖДОГО seq берёт САМОЕ ДЛИННОЕ data. Кольцевой буфер
+        # держит КОПИИ лога, и копия бывает ОБРЕЗАНА посреди события
+        # ('PATHEV:5000:15|MAP|Grou' - обрыв на границе копии). Sort -Unique брал
+        # СЛУЧАЙНУЮ копию: обрезанный 'MAP|Grou' выигрывал у полного 'Grounds_hub'
+        # -> CurrentMap='Grou' -> ложный wrong-map ('предложил перейти на ту же
+        # карту', репорт юзера). Самое длинное data = полная копия
+        $ev = @($ev | Group-Object -Property Seq | ForEach-Object {
+            $_.Group | Sort-Object -Property @{ Expression = { $_.D.Length } } -Descending | Select-Object -First 1
+        } | Sort-Object -Property Seq)
         # LastSeq: смена уровня = новый отсчёт seq; смена процесса = новая сессия
         $mx = 0
         foreach ( $e2 in $ev ) { if ( $e2.Seq -gt $mx ) { $mx = $e2.Seq } }
@@ -1121,6 +1207,14 @@ function Complete-SyncFromLogInner {
                     # v5.6: имя карты идёт в том же PATHEV-потоке (событие от BaseCam.PathLogMap)
                     if ( $e.D -match '^[0-9A-Za-z_]+$' ) { $script:CurrentMap = $e.D }
                 }
+                'CNST'  {
+                    # v5.17.32.3 (#1): состояние терминала от игры (HPConsole
+                    # ShowConsole/HideConsole пишут CNST|OPEN/CLOSE). Панель пропускает
+                    # ensure-open, если терминал УЖЕ открыт юзером (Shift+grave
+                    # закрыл бы его и команды ушли бы в никуда)
+                    $script:ConsoleOpen = ($e.D -eq "OPEN")
+                    Trace-Type ("CNST " + $e.D + " (seq " + $e.Seq + ")")
+                }
                 'PLAYEND' {
                     # v5.7: проигрывание закончилось само - гасим красный Stop
                     if ( $script:Playing ) { Set-Playing $false }
@@ -1183,6 +1277,10 @@ function Complete-SyncFromLogInner {
         # закрывающий PathPing пачки (не дошёл - консоль осталась открытой, досылаем)
         $script:LastSyncPingCount = 0
         foreach ( $ep in $ev ) { if ( $ep.T -eq 'PING' ) { $script:LastSyncPingCount++ } }
+        # v5.17.32.11: ADD-счётчик - верификация доставки PathAdd (гон символов мог
+        # испортить команду: '~PathAdd' -> Unrecognized, кадр потерян молча)
+        $script:LastSyncAddCount = 0
+        foreach ( $ea in $ev ) { if ( $ea.T -eq 'ADD' ) { $script:LastSyncAddCount++ } }
         for ( $k = 0; $k -lt $rows.Count; $k++ ) { $rows[$k].Num = $k }
 
         # время постановки кадра: штампуем только НОВЫЕ координаты (после F8/вставки);
@@ -1219,8 +1317,13 @@ function Complete-SyncFromLogInner {
             if ( $script:KeyTimes.ContainsKey($sk) ) { $r.Time = $script:KeyTimes[$sk] }
             $ri++
         }
-        $script:StampNextSync = $false
-        $script:PendingImportTimes = $null
+        # v5.17.32.12: штамп сгорает ТОЛЬКО если новый ADD доехал до скана. Первый
+        # синк после F8 бывает РАНЬШЕ события в буфере (лаг) - безусловный сброс
+        # терял время кадра (репорт юзера "перестало записываться время")
+        if ( $script:LastSyncAddCount -gt $script:StampArmAddCount ) {
+            $script:StampNextSync = $false
+            $script:PendingImportTimes = $null
+        }
         if ( $stampChanged ) {
             $lines = @()
             foreach ( $k in $script:KeyTimes.Keys ) { $lines += "$k|$($script:KeyTimes[$k])" }
@@ -1522,7 +1625,7 @@ public class ObsWs {
 # v5.17.31.6-DEBUG: трассировка OBS-флагов в obs-debug.log (красный STOP не гаснет)
 try { [ObsWs]::LogFile = (Join-Path $PSScriptRoot "obs-debug.log") } catch { }
 
-function Sync-AfterCommand([string]$status) {
+function Sync-AfterCommand([string]$status, [int]$verifyAddBefore = -1) {
     # событие пишется в лог сразу после Enter - короткая пауза на всякий случай.
     # v5.16.2 делала синк ПОСЛЕ команды ВСЕГДА полным ("событие в хвосте буфера") -
     # полный скан занимает 10-20с и каждая команда (F8!) висела в typing минуту.
@@ -1565,15 +1668,51 @@ function Sync-AfterCommand([string]$status) {
         }
     }
     if ( $script:LastSyncPingCount -le $pingBefore ) {
-        Send-GameCommands @("PathPing") -SkipOpen | Out-Null
-        Wait-Pump 120
+        # v5.17.32.3: досылка ТОЛЬКО если терминал реально ещё открыт (CNST|OPEN).
+        # PING бывает поздним/незамеченным сканом при УЖЕ закрытом терминале
+        # (репорт юзера: "терминал закрывается, потом открывается и пишется
+        # PathPing") - досылка в закрытый терминал открывала его заново.
+        # Без CNST-патча игры (ConsoleOpen всегда false) - только предупреждение
+        if ( $script:ConsoleOpen ) {
+            Send-GameCommands @("PathPing") -SkipOpen | Out-Null
+            Wait-Pump 120
+            $tries = 0
+            while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
+                Wait-Pump 300
+                $tries++
+            }
+        }
+        if ( $script:LastSyncPingCount -le $pingBefore -and -not $script:ConsoleOpen ) {
+            Set-Status "console may still be open - press grave ( `` ) once to close it" "warn"
+        }
+    }
+    # v5.17.32.11: ВЕРИФИКАЦИЯ PathAdd (запрос юзера): гон символов мог испортить
+    # команду ('~PathAdd' -> Unrecognized) при УСПЕШНОМ PathPing - кадр терялся
+    # молча. Если ADD-событий не прибавилось - ОДНА повторная отправка (полный
+    # ensure-open заново: PathPing уже закрыл консоль), потом честное предупреждение
+    # v5.17.32.12: ADD бывает ПОЗДНИМ (тот же лаг буфера, что у PING - "поздний"
+    # НЕ значит "потерянный"): перед ретраем 400мс + рескан, иначе ЛОЖНЫЙ ретрай
+    # ставил ВТОРОЙ кадр и ломал состояние консоли (репорт юзера)
+    if ( $verifyAddBefore -ge 0 -and $script:LastSyncAddCount -le $verifyAddBefore ) {
+        Wait-Pump 400
         $tries = 0
         while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
             Wait-Pump 300
             $tries++
         }
-        if ( $script:LastSyncPingCount -le $pingBefore ) {
-            Set-Status "console may still be open - press grave ( `` ) once to close it" "warn"
+    }
+    if ( $verifyAddBefore -ge 0 -and $script:LastSyncAddCount -le $verifyAddBefore ) {
+        Set-Status "keyframe not confirmed - retrying PathAdd" "warn"
+        [void](Send-GameCommands @("PathAdd"))
+        $tries = 0
+        while ( -not (Sync-FromLog) -and $tries -lt 6 ) {
+            Wait-Pump 300
+            $tries++
+        }
+        if ( $script:LastSyncAddCount -le $verifyAddBefore ) {
+            Set-Status "keyframe may be lost - check the table and press F8 again" "warn"
+        } else {
+            if ( $status -ne "" ) { Set-Status $status } else { Set-Status "keyframe confirmed on retry" }
         }
     }
     # v5.17.30.9e: отложенный полный рескан (10с после команды) УДАЛЁН - он гонял
@@ -1741,17 +1880,23 @@ function Send-PathSaveAndSync([string]$prefix) {
         <Image Name="ImgOwl" Width="26" Height="26" Margin="2,0,8,0"/>
         <TextBlock Text="HP2 Machinima Panel" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
       </StackPanel>
-      <UniformGrid Grid.Column="1" Columns="4" VerticalAlignment="Center" Margin="0,0,10,0">
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+      <!-- v5.17.32: чипы хоткеев КЛИКАБЕЛЬНЫ (просьба юзера) - клик = то же действие,
+           что и сама клавиша. Border + MouseLeftButtonDown: Button перехватил бы
+           клик своим Chrome-стилем, а нам нужен родной вид чипа -->
+      <UniformGrid Grid.Column="1" Columns="5" VerticalAlignment="Center" Margin="0,0,10,0">
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipRefresh">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F5"/> <Run Name="TxHkRefresh" Foreground="{DynamicResource MutedBrush}" Text="  refresh"/></TextBlock>
+        </Border>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipFrame">
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Name="TxHkFrame" Foreground="{DynamicResource MutedBrush}" Text="  frame"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipPlay">
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Name="TxHkPlay" Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipStop">
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Name="TxHkStop" Foreground="{DynamicResource MutedBrush}" Text="  stop"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4">
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipClear">
           <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Name="TxHkClear" Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
@@ -2020,27 +2165,34 @@ function Send-PathSaveAndSync([string]$prefix) {
                 HorizontalContentAlignment="Left" Padding="14,4"/>
         <!-- v5.17.31 (#5): OBS запись. Состояния: OBS не запущен / WS не подключён /
              подключён (REC) / пишем (STOP). Иконка OBS - упрощённый вектор логотипа.
-             Кнопка ⓘ справа: наведение показывает инструкцию настройки OBS WS -->
+             Справа в ряд: ⟳ ручная перепроверка (v5.17.31.8 - полл отстаёт до десятков
+             секунд), 🔒 пароль, ⓘ инструкция - плотно, по 2px -->
         <Grid Height="34" Margin="0,6,0,0">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
           <Button Grid.Column="0" Name="BtnObsRec"
                   Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
-                  HorizontalContentAlignment="Left" Padding="14,4" ToolTipService.ShowOnDisabled="True">
+                  HorizontalContentAlignment="Left" Padding="8,3" ToolTipService.ShowOnDisabled="True">
             <StackPanel Orientation="Horizontal">
-              <Image Name="ImgObsLogo" Width="20" Height="20" VerticalAlignment="Center" Margin="0,0,10,0"/>
-              <TextBlock Name="TbObsRec" Text="OBS  ●  REC" FontWeight="Bold" VerticalAlignment="Center"/>
+              <Image Name="ImgObsLogo" Width="20" Height="20" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBlock Name="TbObsRec" Text="OBS ● REC" FontWeight="Bold" VerticalAlignment="Center"/>
             </StackPanel>
           </Button>
-          <Button Grid.Column="1" Name="BtnObsKey" Width="34" Margin="4,0,0,0"
+          <Button Grid.Column="1" Name="BtnObsRefresh" Width="28" Margin="1,0,0,0"
+                  Background="Transparent" BorderThickness="0" Cursor="Hand" VerticalAlignment="Center"
+                  ToolTipService.InitialShowDelay="0" ToolTipService.ShowDuration="20000">
+            <TextBlock Name="TbObsRefresh" Text="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="{DynamicResource NavBrush}"/>
+          </Button>
+          <Button Grid.Column="2" Name="BtnObsKey" Width="28" Margin="1,0,0,0"
                   Background="Transparent" BorderThickness="0" Cursor="Hand" VerticalAlignment="Center"
                   ToolTipService.InitialShowDelay="0">
             <TextBlock Text="&#xE72E;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="{DynamicResource NavBrush}"/>
           </Button>
-          <Button Grid.Column="2" Name="BtnObsInfo" Width="34" Margin="4,0,0,0"
+          <Button Grid.Column="3" Name="BtnObsInfo" Width="28" Margin="1,0,0,0"
                   Background="Transparent" BorderThickness="0" Cursor="Hand" VerticalAlignment="Center"
                   ToolTipService.InitialShowDelay="0" ToolTipService.ShowDuration="20000">
             <TextBlock Text="&#xE946;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="{DynamicResource NavBrush}"/>
@@ -2121,7 +2273,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -2456,16 +2608,28 @@ function Update-ObsButton {
     try {
         $L = $script:LocData[$script:Lang]
         $obsRun = ( (Get-Process obs64 -ErrorAction SilentlyContinue) -ne $null )
+        # v5.17.31.8: галочка "REC with Play" живёт вместе с кнопкой (просьба юзера):
+        # OBS выключен/не подключён - снята и серая (кликнуть нельзя); OBS доступен -
+        # возвращается в сохранённое состояние (настройка obsautorec НЕ теряется,
+        # при старте OBS отметится сама). Программный IsChecked не жжёт Add_Click
+        function Set-ObsAutoUi([bool]$on) {
+            try {
+                $controls['CbObsAuto'].IsEnabled = $on
+                $controls['CbObsAuto'].Opacity = $(if ( $on ) { 1.0 } else { 0.45 })
+                $controls['CbObsAuto'].IsChecked = $(if ( $on ) { $script:ObsAutoRec } else { $false })
+            } catch { }
+        }
         if ( -not $obsRun ) {
             $controls['BtnObsRec'].IsEnabled = $false
             $controls['BtnObsRec'].Opacity = 0.45
-            $controls['TbObsRec'].Text = "OBS  ●  REC"
+            $controls['TbObsRec'].Text = "OBS ● REC"
             $controls['BtnObsRec'].ToolTip = $L.TipObsNotRun
             $controls['BtnObsRec'].Background = $window.Resources['PanelBrush']
+            Set-ObsAutoUi $false
         } elseif ( -not [ObsWs]::Connected ) {
             $controls['BtnObsRec'].IsEnabled = $false
             $controls['BtnObsRec'].Opacity = 0.45
-            $controls['TbObsRec'].Text = "OBS  ●  REC"
+            $controls['TbObsRec'].Text = "OBS ● REC"
             # v5.17.31: пароль не задан - подсказка про кнопку-ключ
             if ( $script:ObsPass -eq "" ) {
                 $controls['BtnObsRec'].ToolTip = $L.TipObsNoPass
@@ -2473,6 +2637,7 @@ function Update-ObsButton {
                 $controls['BtnObsRec'].ToolTip = $L.TipObsNoWs
             }
             $controls['BtnObsRec'].Background = $window.Resources['PanelBrush']
+            Set-ObsAutoUi $false
         } elseif ( [ObsWs]::Recording ) {
             # v5.17.31.3: REC гейтится правилами Play (репорт юзера: кнопка записи
             # доступна раньше, чем можно запустить play - блокируем теми же
@@ -2482,10 +2647,11 @@ function Update-ObsButton {
             $canStop = ( $script:Playing -or ($script:CurrentMap -ne "" -and -not ($script:KeyMap -ne "" -and $script:KeyMap -ne $script:CurrentMap)) )
             $controls['BtnObsRec'].IsEnabled = $canStop
             $controls['BtnObsRec'].Opacity = $(if ( $canStop ) { 1.0 } else { 0.45 })
-            $controls['TbObsRec'].Text = "OBS  ■  STOP"
+            $controls['TbObsRec'].Text = "OBS ■ STOP"
             $controls['BtnObsRec'].ToolTip = $L.TipObsStop
             $controls['BtnObsRec'].Background = "#E5484D"
             $controls['BtnObsRec'].Foreground = "White"
+            Set-ObsAutoUi $true
         } else {
             # v5.17.31.3: старт записи = по смыслу то же, что Play: гейт теми же
             # правилами, что у Play-кнопок (Update-SelectionButtons)
@@ -2493,7 +2659,7 @@ function Update-ObsButton {
             $canPlay = ( $script:CurrentMap -ne "" -and $script:KeyRows -ne $null -and $script:KeyRows.Count -gt 0 -and -not $wrong )
             $controls['BtnObsRec'].IsEnabled = $canPlay
             $controls['BtnObsRec'].Opacity = $(if ( $canPlay ) { 1.0 } else { 0.45 })
-            $controls['TbObsRec'].Text = "OBS  ●  REC"
+            $controls['TbObsRec'].Text = "OBS ● REC"
             if ( -not $canPlay ) {
                 if ( $script:CurrentMap -eq "" ) { $controls['BtnObsRec'].ToolTip = $L.TipNoGame }
                 else { $controls['BtnObsRec'].ToolTip = $L.TipWrongMap }
@@ -2502,6 +2668,7 @@ function Update-ObsButton {
             }
             $controls['BtnObsRec'].Background = $window.Resources['PanelBrush']
             $controls['BtnObsRec'].Foreground = $window.Resources['TextBrush']
+            Set-ObsAutoUi $true
         }
     } catch { }
 }
@@ -2601,9 +2768,13 @@ function Do-PathAdd {
     # скорость юзера или записывали не ту скорость при сбое движка. Дефолт поля
     # Fly speed = 600 (дефолт игры) - панель и игра синхронны с запуска
     $script:StampNextSync = $true   # новый кадр получит время постановки
+    # v5.17.32.11: запоминаем ADD-счётчик ДО отправки - Sync-AfterCommand сверит
+    # и в случае потери кадра повторит PathAdd
+    $addBefore = $script:LastSyncAddCount
+    $script:StampArmAddCount = $addBefore   # v5.17.32.12: штамп ждёт ИМЕННО этот ADD
     $st = Send-GameCommands @("PathAdd")
     Update-ParamBox "speed"
-    Sync-AfterCommand $st
+    Sync-AfterCommand $st $addBefore
 }
 # v5.7: Stop красный, пока идёт показ; гаснет по клику на Stop или по PLAYEND из игры
 $script:Playing = $false
@@ -2688,6 +2859,10 @@ function Do-PathPlay {
     # v5.17.14 (#8): Stop активен СРАЗУ, до ввода команд (команда печатается секунды)
     $controls['BtnPathStop'].IsEnabled = $true
     $controls['BtnPathStop'].Background = "#E5484D"; $controls['BtnPathStop'].Foreground = "White"
+    # v5.17.32.4: терминал открыт юзером - закрываем ДО проигрывания (просьба юзера:
+    # запись не должна начинаться с открытого терминала). PathPing в открытый
+    # терминал закрывает его; после этого основная пачка идёт через тихий ensure-open
+    if ( $script:ConsoleOpen ) { [void](Send-GameCommands @("PathPing")) }
     # v5.17.31.5: PRE-ROLL старт записи ДО ввода команды. Раньше OBS включался из
     # Set-Playing($true) - а та ждёт подтверждения ping'ом, и кино в игре уже шло
     # 1-2с (репорт юзера: "кусок пропадает"). Экстра 1-2с статики в начале дубля
@@ -2719,6 +2894,8 @@ function Do-PathPlayTime {
     # v5.17.14 (#8): Stop активен СРАЗУ, до ввода команд
     $controls['BtnPathStop'].IsEnabled = $true
     $controls['BtnPathStop'].Background = "#E5484D"; $controls['BtnPathStop'].Foreground = "White"
+    # v5.17.32.4: предзакрытие открытого терминала (см. Do-PathPlay)
+    if ( $script:ConsoleOpen ) { [void](Send-GameCommands @("PathPing")) }
     # v5.17.31.5: PRE-ROLL старт записи ДО ввода команды (см. Do-PathPlay)
     $obsPreRoll = $false
     if ( $script:ObsAutoRec -and [ObsWs]::Connected -and -not [ObsWs]::Recording ) {
@@ -4073,12 +4250,13 @@ $window.Add_Loaded({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
     $hwnd = $helper.Handle
     $src = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
-    # id: 1=PathAdd(F8) 2=PathPlay(F9) 3=PathStop(F10) 4=SaveIni(F11) 5=ShowPanel(Ctrl+Alt+H)
+    # id: 1=PathAdd(F8) 2=PathPlay(F9) 3=PathStop(F10) 4=SaveIni(F11) 5=ShowPanel(Ctrl+Alt+H) 6=Refresh(F5, #21)
     [GameCtl]::RegisterHotKey($hwnd, 1, 0, 0x77) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 2, 0, 0x78) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 3, 0, 0x79) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 4, 0, 0x7A) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 5, 3, 0x48) | Out-Null   # MOD_CONTROL|MOD_ALT + H
+    [GameCtl]::RegisterHotKey($hwnd, 6, 0, 0x74) | Out-Null   # F5 (#21: таблица + OBS + игра)
     $src.AddHook({
         param($hwnd, $msg, $wparam, $lparam, $handled)
         if ( $msg -eq 0x0312 )   # WM_HOTKEY
@@ -4088,6 +4266,10 @@ $window.Add_Loaded({
                 1 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathAdd }) | Out-Null }
                 2 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathPlay }) | Out-Null }
                 3 { $window.Dispatcher.BeginInvoke([Action]{ $st = Send-GameCommand "PathStop"; Set-Playing $false; Set-Status $st }) | Out-Null }
+                6 {
+                    # F5 (#21): обновить таблицу кадров + перепроверить OBS + состояние игры
+                    $window.Dispatcher.BeginInvoke([Action]{ Do-FullRefresh }) | Out-Null
+                }
                 4 {
                     # F11 = PathClear + сброс ini + таблица
                     # v5.17.30.5: ЯВНАЯ очистка - как кнопка корзины, должна ставить
@@ -4119,7 +4301,21 @@ $window.Add_Loaded({
         }
         return [IntPtr]::Zero
     })
-    Set-Status "hotkeys: F8 add / F9 play / F10 stop / F11 clear / Ctrl+Alt+H panel"
+    Set-Status "hotkeys: F5 refresh / F8 add / F9 play / F10 stop / F11 clear / Ctrl+Alt+H panel"
+    # v5.17.32: клик по чипу хоткея = то же действие, что и клавиша (запрос юзера).
+    # Один и тот же код, что в WM_HOTKEY-ветках выше
+    try {
+        $controls['HkChipRefresh'].Add_MouseLeftButtonDown({ param($s, $e) Do-FullRefresh })
+        $controls['HkChipFrame'].Add_MouseLeftButtonDown({ param($s, $e) Do-PathAdd })
+        $controls['HkChipPlay'].Add_MouseLeftButtonDown({ param($s, $e) Do-PathPlay })
+        $controls['HkChipStop'].Add_MouseLeftButtonDown({ param($s, $e) $st = Send-GameCommand "PathStop"; Set-Playing $false; Set-Status $st })
+        $controls['HkChipClear'].Add_MouseLeftButtonDown({
+            param($s, $e)
+            $script:UserClearPending = $true
+            $st = Send-GameCommand "PathClear"
+            Send-PathSaveAndSync $st
+        })
+    } catch { }
     Sync-FromLog -Force
 })
 
@@ -4189,6 +4385,7 @@ $script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed'
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
+$script:DgWasDisabled = $false   # v5.17.32.1: таблица была выключена (для разового Items.Refresh)
 function Update-SelectionButtons {
     # v5.17.27: карточка карты живёт в тех же состояниях (chip-only при выключенной
     # игре) - обновляем её вместе с кнопками, иначе после закрытия игры она
@@ -4210,9 +4407,20 @@ function Update-SelectionButtons {
     # 5.4с-полл со сбойным сканом (CurrentMap слетел в "") гасили Stop посреди
     # проигрывания, а через несколько секунд полл его возвращал
     if ( $script:Playing ) {
+        # v5.17.32: таблица отключается на время кино - ЗАВЕРШАЕМ активную правку
+        # ячейки ПЕРЕД отключением. Иначе WPF DataGrid, выключенный посреди
+        # редактирования, после включения оставляет строки в застрявшем
+        # disabled-визуале (серый оверлей, репорт юзера: "таблица серая, будто
+        # заблокирована, но изменять её можно")
+        try {
+            if ( $controls['DgKeys'].IsEnabled -and $controls['DgKeys'].HasItems ) {
+                $controls['DgKeys'].CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true) | Out-Null
+            }
+        } catch { }
         foreach ( $b in $script:PlayLock ) {
             Set-CtlEnabled $b $false
         }
+        $script:DgWasDisabled = $true   # v5.17.32.1: для рефреша при включении обратно
         Set-CtlEnabled 'BtnExport' $true
         $controls['BtnPathStop'].IsEnabled = $true
         Set-CtlEnabled 'BtnPathPlay' $true
@@ -4229,6 +4437,7 @@ function Update-SelectionButtons {
         }
         try {
             $controls['DgKeys'].IsEnabled = $rowsLeft
+            if ( -not $rowsLeft ) { $script:DgWasDisabled = $true }
             $controls['BtnPathClear'].IsEnabled = $rowsLeft
         } catch { }
         $controls['BtnPathStop'].IsEnabled = $false
@@ -4253,7 +4462,10 @@ function Update-SelectionButtons {
         foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed','BtnFovAll','BtnSpeedAll')) ) {
             Set-CtlEnabled $b $false
         }
-        try { $controls['DgKeys'].IsEnabled = $false } catch { }
+        try {
+            $controls['DgKeys'].IsEnabled = $false
+            $script:DgWasDisabled = $true
+        } catch { }
         # v5.17.7: цикл PlayLock выше перевключил Set FOV / Set fly speed - вернуть
         # серость по правилу "в поле уже применённое значение"
         Set-ParamBoxState "fov"
@@ -4279,8 +4491,20 @@ function Update-SelectionButtons {
     # перезаписывались KeysDep ниже, потому виделись правильными)
     foreach ( $b in $script:NoGameDep ) { Set-CtlEnabled $b $true }
     foreach ( $b in $script:SelDep ) { Set-CtlEnabled $b $has }
-    # v5.17.30: после wrong-map лока и PlayLock таблица включается обратно явно
-    try { $controls['DgKeys'].IsEnabled = $true } catch { }
+    # v5.17.30: после wrong-map лока и PlayLock таблица включается обратно явно.
+    # v5.17.32.2: включение через Set-CtlEnabled (возвращает и Opacity=1.0!):
+    # PlayLock гасил таблицу Set-CtlEnabled (IsEnabled=false + Opacity=0.45),
+    # а прямой IsEnabled=$true ОСТАВЛЯЛ Opacity=0.45 навсегда - таблица выглядела
+    # серой/полупрозрачной, но работала (репорт юзера; сквозь неё просвечивал
+    # контент за панелью). Items.Refresh - ТОЛЬКО при переходе выкл->вкл:
+    # безусловный рефреш на каждом тике убивал начатое редактирование ячейки
+    try {
+        if ( -not $controls['DgKeys'].IsEnabled -or $script:DgWasDisabled ) {
+            Set-CtlEnabled 'DgKeys' $true
+            $controls['DgKeys'].Items.Refresh()
+            $script:DgWasDisabled = $false
+        }
+    } catch { }
     foreach ( $b in $script:KeysDep ) { Set-CtlEnabled $b ($n -gt 0) }
     Set-CtlEnabled 'BtnPathClear' ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = $false
@@ -4493,7 +4717,7 @@ $script:LocData = @{
         SetFov = "Set FOV"; FovKey = "🎯 FOV → key"; FovAll = "🌐 FOV → ALL"
         SetSpeed = "Set fly speed"; SpeedKey = "⚡ Speed → key"; SpeedAll = "🗂 Speed → ALL"
         Transparent = "Transparent"; HideBtn = "Hide"
-        HkFrame = "  frame"; HkPlay = "  play"; HkStop = "  stop"; HkClear = "  clear"
+        HkFrame = "  frame"; HkPlay = "  play"; HkStop = "  stop"; HkClear = "  clear"; HkRefresh = "  refresh"
         TipSelect = "Select a keyframe row in the table first"
         TipEdit = "Edit the value - the button unlocks when it differs from the applied one"
         TipNeedKeys = "Add at least one keyframe first (F8)"
@@ -4536,6 +4760,7 @@ $script:LocData = @{
         ObsEye = "Show or hide the password"
         ObsAuto = "REC with Play"
         ObsAutoTip = "Start OBS recording when playback starts, stop it when playback ends"
+        TipObsRefresh = "Re-check the OBS connection now (the automatic check may lag while the panel is busy)"
         TipObsKey = "Set the OBS WebSocket password (same as in OBS: Tools -> WebSocket Server Settings)"
         TipObsNoPass = "OBS WebSocket needs a password: set it in OBS (Tools -> WebSocket Server Settings) and here via the key button"
         TipObsInfo = "OBS setup:`n1) Tools -> WebSocket Server Settings`n2) Enable WebSocket server, port 4455`n3) Set the same password (6+ chars) in OBS and in the panel via the key button`nThe REC button activates automatically."
@@ -4558,7 +4783,7 @@ $script:LocData = @{
         SetFov = "Задать FOV"; FovKey = "🎯 FOV → кадр"; FovAll = "🌐 FOV → ВСЕ"
         SetSpeed = "Задать скорость"; SpeedKey = "⚡ Скор. → кадр"; SpeedAll = "🗂 Скор. → ВСЕ"
         Transparent = "Прозрачность"; HideBtn = "Скрыть"
-        HkFrame = "  кадр"; HkPlay = "  воспроизв."; HkStop = "  стоп"; HkClear = "  очистка"
+        HkFrame = "  кадр"; HkPlay = "  воспроизв."; HkStop = "  стоп"; HkClear = "  очистка"; HkRefresh = "  обновл."
         TipSelect = "Сначала выберите кадр в таблице (клик по строке)"
         TipEdit = "Измените значение - кнопка станет активной, когда оно отличается от применённого"
         TipNeedKeys = "Сначала добавьте хотя бы один кадр (F8)"
@@ -4601,6 +4826,7 @@ $script:LocData = @{
         ObsEye = "Показать или скрыть пароль"
         ObsAuto = "REC вместе с Play"
         ObsAutoTip = "Запись OBS стартует вместе с воспроизведением и заканчивается при его окончании"
+        TipObsRefresh = "Перепроверить подключение OBS сейчас (автопроверка может отставать, пока панель занята)"
         TipObsKey = "Задать пароль OBS WebSocket (тот же, что в OBS: Сервис -> Настройки сервера WebSocket)"
         TipObsNoPass = "OBS WebSocket требует пароль: задай его в OBS (Сервис -> Настройки сервера WebSocket) и здесь кнопкой с ключом"
         TipObsInfo = "Настройка OBS:`n1) Сервис -> Настройки сервера WebSocket`n2) Включить сервер WebSocket, порт 4455`n3) Один и тот же пароль (6+ символов) в OBS и в панели кнопкой с ключом`nКнопка REC активируется сама."
@@ -4638,6 +4864,7 @@ function Set-Lang([string]$lang) {
     $controls['TxHkPlay'].Text = $L.HkPlay
     $controls['TxHkStop'].Text = $L.HkStop
     $controls['TxHkClear'].Text = $L.HkClear
+    $controls['TxHkRefresh'].Text = $L.HkRefresh
     $controls['TxFramesLabel'].Text = $L.Keyframes
     $controls['TbMapLabel'].Text = $L.Map
     $controls['TxSec'].Text = $L.Sec
@@ -4654,6 +4881,8 @@ function Set-Lang([string]$lang) {
     # v5.17.31.4: чекбокс авто-записи "REC вместе с Play"
     $controls['CbObsAuto'].Content = $L.ObsAuto
     $controls['CbObsAuto'].ToolTip = $L.ObsAutoTip
+    # v5.17.31.8: тултип кнопки ⟳ ручной перепроверки
+    $controls['BtnObsRefresh'].ToolTip = $L.TipObsRefresh
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
     $controls['FlagRU'].Visibility = if ( $lang -eq "ru" ) { "Visible" } else { "Collapsed" }
     Save-Settings
@@ -4720,6 +4949,52 @@ try {
     })
 } catch { }
 
+# v5.17.31.8: кнопка ⟳ - РУЧНАЯ перепроверка OBS. Полл живёт на UI-потоке и при
+# занятых сканах/печати отстаёт до десятков секунд (репорт юзера: "полминуты
+# после запуска OBS до разблокировки кнопки"). Клик: форс-коннект/сброс стейла +
+# догоняющие Update-ObsButton таймером (коннект асинхронный ~0.5-1с, а тики могут
+# тянуться - таймер доводит визуал сам, не дожидаясь полла)
+function Do-ObsRecheck {
+    try {
+        Set-Status "OBS: re-checking connection"
+        $obsRun = ( (Get-Process obs64 -ErrorAction SilentlyContinue) -ne $null )
+        if ( $obsRun ) {
+            if ( -not [ObsWs]::Connected -and -not [ObsWs]::Connecting ) {
+                [ObsWs]::Connect('127.0.0.1', $script:ObsPort, $script:ObsPass)
+            }
+        } elseif ( [ObsWs]::Connected -or [ObsWs]::Connecting ) {
+            [ObsWs]::Disconnect()   # OBS закрыли - стейл соединения больше не нужен
+        }
+        if ( [ObsWs]::Connected ) { [void][ObsWs]::GetRecordStatus() }
+    } catch { }
+    Update-ObsButton
+    $script:ObsRefTicks = 5
+    if ( $script:ObsRefTimer -eq $null ) {
+        $script:ObsRefTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:ObsRefTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+        $script:ObsRefTimer.Add_Tick({
+            try {
+                if ( [ObsWs]::Connected ) { [void][ObsWs]::GetRecordStatus() }
+                Update-ObsButton
+            } catch { }
+            $script:ObsRefTicks = $script:ObsRefTicks - 1
+            if ( $script:ObsRefTicks -le 0 ) { $script:ObsRefTimer.Stop() }
+        })
+    }
+    $script:ObsRefTimer.Start()
+}
+try {
+    $controls['BtnObsRefresh'].Add_Click({ Do-ObsRecheck })
+} catch { }
+
+# v5.17.32 (#21): F5 = обновить ВСЁ: таблицу кадров (форс-скан), OBS-соединение,
+# состояние игры (карта приходит из того же скана)
+function Do-FullRefresh {
+    try { Set-Status "refresh: syncing table, OBS and game state" } catch { }
+    Do-ObsRecheck
+    try { Sync-FromLog -Force } catch { }
+}
+
 # ---------- owl icon ----------
 # v5.13: стрелка обновления - глиф "Refresh" из Segoe MDL2 + СВЕЖИЙ unfrozen-трансформ.
 # XAML-трансформ от XamlReader заморожен - BeginAnimation на нём бросал исключение
@@ -4782,7 +5057,18 @@ if ( Test-Path $iconPath ) {
 $window.Dispatcher.add_UnhandledException({
     param($s, $a)
     try {
-        $msg = "[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] Dispatcher: " + $a.Exception.GetType().FullName + ": " + $a.Exception.Message + "`r`n" + $a.Exception.StackTrace + "`r`n---`r`n"
+        $msg = "[" + (Get-Date -Format "yyyy-MM-dd HH:mm:ss") + "] Dispatcher: " + $a.Exception.GetType().FullName + ": " + $a.Exception.Message + "`r`n" + $a.Exception.StackTrace + "`r`n"
+        # v5.17.32.15: внутреннее исключение + ПОЗИЦИЯ скрипта - стек PS в
+        # Dispatcher-исключениях не показывает строку панели
+        $inner = $a.Exception.InnerException
+        $depth = 0
+        while ( $inner -ne $null -and $depth -lt 5 ) {
+            $msg += "INNER[" + $depth + "]: " + $inner.GetType().FullName + ": " + $inner.Message + "`r`n"
+            if ( $inner.InvocationInfo -ne $null ) { $msg += "AT: " + $inner.InvocationInfo.PositionMessage + "`r`n" }
+            $inner = $inner.InnerException
+            $depth++
+        }
+        $msg += "---`r`n"
         [System.IO.File]::AppendAllText((Join-Path $PSScriptRoot "crash.log"), $msg)
     } catch { }
     $a.Handled = $true
