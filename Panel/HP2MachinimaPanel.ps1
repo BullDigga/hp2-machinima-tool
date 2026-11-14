@@ -3129,7 +3129,18 @@ function Apply-ConsoleQuiet {
     try {
         Send-GameCommand ("QuietConsole " + $(if ( $script:ConsoleQuiet ) { 1 } else { 0 })) | Out-Null
         $script:QuietSentState = $script:ConsoleQuiet
-        Set-Status ("console: QuietConsole " + $(if ( $script:ConsoleQuiet ) { 1 } else { 0 }) + " applied")
+        # v5.17.41.3: сама команда-переключатель печатается в ЕЩЁ запаркованную
+        # (невидимую) консоль - юзер не видит НИЧЕГО и решает, что не сработало
+        # (репорт: "никакой команды не написалось и консоль всё ещё не видно").
+        # При переходе в видимый режим добиваем нейтральным PathDumpKeys:
+        # ensure-open откроет консоль УЖЕ видимой - наглядный флеш-подтверждение.
+        # При переходе в тихий режим ничего добивать не нужно
+        if ( -not $script:ConsoleQuiet ) {
+            Send-GameCommand "PathDumpKeys" | Out-Null
+            Set-Status "console: visible mode ON - this flash was the terminal (next commands will show it too)"
+        } else {
+            Set-Status "console: off-screen parking ON"
+        }
     } catch { }
 }
 function Do-PathPlay {
@@ -5487,14 +5498,30 @@ try {
 # v5.17.41: чекбокс "Console off-screen" - тихая парковка терминала при пачках
 # панельных команд или видимый терминал "как обычно" (игровая команда
 # QuietConsole 1/0, exec в HPConsole + SaveConfig - выбор переживает рестарт игры)
+# v5.17.41.4: шлём СРАЗУ по клику (как обычную кнопку), а не на тике полла.
+# Юзер: "команды через сто лет улетают или вовсе не летают" - тик полла 2.7с
+# часто совпадал с SyncBusy (полные сканы до 20-60с), Apply отскакивал раз за
+# разом. Ретрай-таймер 400мс добивает, если клик попал в скан
 try {
     $controls['CbConsoleQuiet'].IsChecked = $script:ConsoleQuiet
+    $script:QuietRetryTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:QuietRetryTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+    $script:QuietRetryTimer.Add_Tick({
+        # флаг QuietSentState выставит Apply, когда гарды пропустят
+        Apply-ConsoleQuiet
+        if ( $script:QuietSentState -eq $script:ConsoleQuiet ) { $script:QuietRetryTimer.Stop() }
+    })
     $controls['CbConsoleQuiet'].Add_Click({
         $script:ConsoleQuiet = ($controls['CbConsoleQuiet'].IsChecked -eq $true)
         Save-Settings
-        # команда уйдёт при ближайшем полле в игре (сейчас может идти пачка)
         $script:QuietSentState = -1
-        Set-Status $(if ( $script:ConsoleQuiet ) { "console: off-screen parking during panel commands" } else { "console: visible during panel commands (as usual)" })
+        Apply-ConsoleQuiet   # сразу; если SyncBusy/SendBusy - не уйдёт и молчит
+        if ( $script:QuietSentState -ne $script:ConsoleQuiet ) {
+            # занято сканом/пачкой - ретрай каждые 400мс до успеха
+            $script:QuietRetryTimer.Stop()
+            $script:QuietRetryTimer.Start()
+            Set-Status ("console: " + $(if ( $script:ConsoleQuiet ) { "off-screen" } else { "visible" }) + " queued - waiting for the current scan to finish...")
+        }
     })
 } catch { }
 
