@@ -10,19 +10,40 @@ $ErrorActionPreference = "Stop"
 # гоняет csc.exe по всем блокам ниже (~30-40 сек "панель долго открывается").
 # Первый старт ещё компилирует и сохраняет DLL, дальше типы грузятся с диска
 function Add-TypeCached {
+    # v5.17.35.2: у кэша появился ХЭШ ИСХОДНИКА (.hash рядом с dll). Прежний код
+    # грузил dll молча, даже если исходник менялся - правки C#-типов (добавили
+    # KeyRow.Hold) молча НЕ ВСТУПАЛИ: биндинг нового свойства пустой, присвоения
+    # $obj.Prop кидают исключения в catch. Протухший кэш = delete dll вручную -
+    # теперь проверяется md5: не совпал - перекомпиляция. Ручное удаление больше
+    # не нужно (но dll всё равно пересоздаётся).
     param([string]$TypeName, [string]$Source, [string[]]$Refs = @())
     if ( $TypeName -as [type] ) { return }
     $dir = Join-Path $PSScriptRoot "cache"
     try {
         if ( -not (Test-Path $dir) ) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
         $dll = Join-Path $dir (($TypeName -replace '[^A-Za-z0-9_.]', '_') + ".dll")
-        if ( Test-Path $dll ) {
+        $hashFile = $dll + ".hash"
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        $srcHash = ([BitConverter]::ToString($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Source))) -replace '-', '').ToLower()
+        $md5.Dispose()
+        if ( (Test-Path $dll) -and (Test-Path $hashFile) -and ((Get-Content $hashFile -Raw) -eq $srcHash) ) {
             try { Add-Type -Path $dll } catch { }
             if ( $TypeName -as [type] ) { return }
         }
         if ( $Refs.Count -gt 0 ) { Add-Type -TypeDefinition $Source -ReferencedAssemblies $Refs -OutputAssembly $dll | Out-Null }
         else { Add-Type -TypeDefinition $Source -OutputAssembly $dll | Out-Null }
+        # v5.17.35.5: -OutputAssembly СОХРАНЯЕТ сборку на диск, но НЕ ГРУЗИТ её в
+        # сессию (проверено изоляцией: 'type loaded after -OutputAssembly: False').
+        # Прежний код после этого кидал throw и перекомпилировал В ПАМЯТИ в catch -
+        # двойная компиляция на каждый рестарт и хэш не писался никогда. Грузим явно
+        if ( -not ($TypeName -as [type]) ) { try { Add-Type -Path $dll } catch { } }
         if ( -not ($TypeName -as [type]) ) { throw ("type not available after compile: " + $TypeName) }
+        try { [System.IO.File]::WriteAllText($hashFile, $srcHash) }
+        catch {
+            try {
+                [System.IO.File]::AppendAllText((Join-Path $PSScriptRoot "atc-debug.log"), (Get-Date -Format HH:mm:ss) + " " + $TypeName + ": " + $_.Exception.GetType().Name + ": " + $_.Exception.Message + "`r`n")
+            } catch { }
+        }
     } catch {
         if ( $Refs.Count -gt 0 ) { Add-Type -TypeDefinition $Source -ReferencedAssemblies $Refs | Out-Null }
         else { Add-Type -TypeDefinition $Source | Out-Null }
@@ -138,6 +159,7 @@ public class KeyRow {
     public int Pitch { get; set; }
     public double FOV { get; set; }
     public double Speed { get; set; }
+    public double Hold { get; set; }   // v5.17.35 (#9): seconds the camera hovers at this key (default 0)
     public long Seq { get; set; }
 }
 "@
@@ -285,8 +307,12 @@ public class MemScanPanel {
             // региона. Живой замер (Tools/hit-offsets.ps1): все PATHEV-хиты лежат
             // у начал регионов (макс 8.4МБ из 140МБ) - лог и его копии в куче
             // группируются у head, хвост региона - чужие данные. Скан 2.1с -> ~0.3с.
-            // Рост буфера за 16МБ ловится полным ресканом (~3.6мин) и авто-форсом
-            if ( regS > 0x1000000 ) { regS = 0x1000000; }
+            // v5.17.35.5: окно АДАПТИВНОЕ (HeadWindow, SetHeadWindow). За вечер буфер
+            // дорос за 16МБ (импорты по 113 команд) - свежие события ушли глубже окна,
+            // быстрый скан читал огрызок, гард усечения молотил полными сканами
+            // ("обновляется в 10 раз дольше"). Гард панели теперь УДВАИВАЕТ окно
+            // (16->32->...->256МБ) вместо полного скана
+            if ( regS > HeadWindow ) { regS = HeadWindow; }
             var seen = new System.Collections.Generic.HashSet<long>();
             var seenL = new System.Collections.Generic.HashSet<long>();
             long pos = 0;
@@ -352,6 +378,10 @@ public class MemScanPanel {
         CloseHandle(h);
         return sb.ToString();
     }
+
+    // v5.17.35.5: адаптивное окно головы быстрого скана (байт), см. ExtractRegions
+    public static int HeadWindow = 0x1000000;   // 16МБ по умолчанию
+    public static void SetHeadWindow(int bytes) { HeadWindow = bytes; }
 
     // v5.8: фоновый скан (UI панели не блокируется, иконка ⟳ крутится)
     public static string AsyncResult = "";
@@ -507,12 +537,61 @@ function Confirm-GameActive {
     } catch { return $false }
 }
 
-function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
+# v5.17.37: отложенное закрытие консоли после -KeepOpen пачки: через 2.5с тишины
+# печатается PathPing (фокус берёт на себя Send-GameCommands). Серия быстрых
+# правок переармает таймер - консоль не переоткрывается на каждую правку
+function Arm-CloseTimer {
+    try {
+        if ( $script:KeepOpenTimer -eq $null ) {
+            $script:KeepOpenTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:KeepOpenTimer.Interval = [TimeSpan]::FromMilliseconds(2500)
+            $script:KeepOpenTimer.Add_Tick({
+                try {
+                    $script:KeepOpenTimer.Stop()
+                    if ( -not $script:SendBusy ) {
+                        Trace-Type "deferred close (keep-open idle)"
+                        Send-GameCommands @("PathPing") | Out-Null
+                    }
+                } catch { }
+            })
+        }
+        $script:KeepOpenTimer.Stop()
+        $script:KeepOpenTimer.Start()
+    } catch { }
+}
+
+function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen, [switch]$KeepOpen) {
     # v5.17.6: защита от повторного клика во время печати + Pump-Dispatcher
     # прокачивает отрисовку - спиннер крутится СРАЗУ и НЕ ЗАМИРАЕТ на весь ввод
     # v5.17.30.9d: -SkipOpen - досылка закрытия (PathPing потерялся => консоль
     # ЕЩЁ ОТКРЫТА, ensure-open не нужен: экономия 0.6с на повторе)
+    # v5.17.35.5: трассировка входа и ВСЕХ отказов гвардов (диагностика "правки
+    # не сохраняются" - отправка молча тонла в guards без единого следа в трейсе)
+    # v5.17.37: -KeepOpen - НЕ закрывать консоль после пачки (PathPing-закрытие
+    # откладывается таймером на 2.5с): правка таблицы = команды уходят в уже
+    # открытую (запаркованную за экраном) консоль, perceived-время < 1с, а серия
+    # правок вообще без переоткрытий. Закрытие - отложенный PathPing
+    $caller = ""
+    try { $cs = Get-PSCallStack; $caller = ($cs[1].Command + "@" + $cs[1].ScriptLineNumber + " <- " + $cs[2].Command + "@" + $cs[2].ScriptLineNumber + " <- " + $cs[3].Command + "@" + $cs[3].ScriptLineNumber) } catch { }
+    Trace-Type ("send enter: " + $cmds.Count + " cmds: " + $cmds[0] + " <- " + $caller)
+    # v5.17.37.2: меню-книга открыта над уровнем - команды не доходят (репорт
+    # юзера: "в меню нажал команду - предупреждай"). Фоновые зонды (ConfirmBypass)
+    # пропускаем - они только читают дамп.
+    # v5.17.37.4: МОДАЛЬНОЕ окно (статуса мало - юзер видел warn, а через секунду
+    # "ОК" от ретрая): фокус в панель + бокс, как у F11-подтверждения
+    if ( $script:BookOpen -and -not $script:ConfirmBypass ) {
+        Trace-Type "send blocked: menu-book open"
+        Set-Status ($script:LocData[$script:Lang].InBookWarn) "warn"
+        try {
+            $wH = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+            if ( $wH -ne [IntPtr]::Zero ) { [GameCtl]::SetForegroundWindow($wH) | Out-Null }
+            $window.Activate()
+            [System.Windows.MessageBox]::Show($window, $script:LocData[$script:Lang].InBookWarn, "HP2 Machinima Panel", 'OK', 'Warning') | Out-Null
+        } catch { }
+        return "aborted: menu-book is open - close it first"
+    }
     if ( $script:SendBusy ) {
+        Trace-Type "send blocked: SendBusy"
         # v5.17.30.1: отказ был НЕВИДИМ - статус "typing..." оставался висеть, юзер
         # жаловался "кадр не добавляется". Показываем warn прямо в статус
         Set-Status "busy: the previous command is still sending - try again in a moment" "warn"
@@ -523,10 +602,11 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
     # идут вперемешку - команды портятся посимвольно ("перестал карты грузить").
     # Глубина защищает от этого независимо от состояния флага
     if ( $script:SendDepth -gt 0 ) {
+        Trace-Type "send blocked: SendDepth"
         Set-Status "busy: another send is still typing (re-entry blocked)" "warn"
         return "busy - re-entry blocked"
     }
-    if ( -not $script:ConfirmBypass -and -not (Confirm-GameActive) ) { return "aborted: game not on a level" }
+    if ( -not $script:ConfirmBypass -and -not (Confirm-GameActive) ) { Trace-Type "send blocked: Confirm-GameActive"; return "aborted: game not on a level" }
     # v5.17.27: фоновые зонды (ConfirmBypass: старт панели, 5.4с-полл в меню) обязаны
     # сфокусировать игру ради консоли, но не должны УВОДИТЬ фокус - жалоба юзера
     # "перед панелью открывается Гарри Поттер". Запоминаем активное окно и возвращаем
@@ -536,6 +616,7 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
     $script:SendBusy = $true
     $script:SendDepth = $script:SendDepth + 1
     $script:SendStartedAt = Get-Date
+    $script:SendLastProgAt = $script:SendStartedAt   # v5.17.34: прогресс = последняя напечатанная команда
     try {
         Start-Spin   # v5.11: крутится СРАЗУ при клике, не после отправки команды
         # v5.17.7: оранжевый debug-статус СРАЗУ при клике - что и сколько печатаем
@@ -551,6 +632,7 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
         $vw = [GameCtl]::FindWindowW("GameUnrealWWindowsViewportWindow", [NullString]::Value)
         if ( $vw -eq [IntPtr]::Zero -or $vw -ne $h ) {
             Stop-Spin
+            Set-Status "you are in the game menu - commands won't be executed (load a level first)" "warn"
             return "game is not on a level (no viewport window) - typing skipped"
         }
         # v5.17.32.14: PID игры для фокус-чека по процессу (хэндл меняется при
@@ -579,11 +661,11 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
             # открыт (CNST|OPEN от игры, Shift+grave закрыл бы его)
             Trace-Type "ensure-open: shift+grave+backspace (flag closed)"
             [GameCtl]::KeyDown([uint16]0x10)
-            Wait-Pump 250
+            Wait-Pump 200
             [GameCtl]::Tap([uint16]$VK['grave'])
-            Wait-Pump 150
-            [GameCtl]::KeyUp([uint16]0x10)
             Wait-Pump 120
+            [GameCtl]::KeyUp([uint16]0x10)
+            Wait-Pump 100
             # v5.17.32.5: СИМВОЛЬНЫЙ ГОН терминала (скрин терминала юзера:
             # '> ~PathPlaySpeed / Unrecognized command'): Shift ещё зажат при
             # открытии консоли, и символ shift+grave ('~') просыпается в СТРОКЕ
@@ -592,7 +674,7 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
             # Детерминированная чистка: один Backspace по открытой строке -
             # стирает slipped '~', пустой строке безвреден
             [GameCtl]::Tap([uint16]0x08)
-            Wait-Pump 80
+            Wait-Pump 60
         }
         # v5.17.8: прогресс [i/N] с бегущими точками + проверка фокуса ПЕРЕД КАЖДОЙ командой.
         # Alt-Tab во время пачки (импорт) печатал остаток команд в ЧУЖОЕ окно, а консоль игры
@@ -602,11 +684,13 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
         $res = ""
         $script:SendFocusLost = $false
         foreach ($c in $cmds) {
-            # v5.17.30.4: само-прерывание застрявшей отправки - watchdog полла (60с)
-            # сбрасывает флаг, но ЦИКЛ старой отправки продолжает жить и печатать;
-            # теперь цикл умирает сам до того, как новая отправка начнёт мешать
-            if ( $script:SendStartedAt -ne $null -and ((Get-Date) - $script:SendStartedAt).TotalSeconds -gt 50 ) {
-                $res = "send timed out at [$($ci+1)/$($cmds.Count)] - aborted (stale typing stopped)"
+            # v5.17.34: само-прерывание ЗАСТРЯВШЕЙ отправки = НЕТ ПРОГРЕССА, а не
+            # "долго от старта пачки". Импорт 14 кадров = 113 команд и легально
+            # печатается ~1.5 мин - старый 50с-лимит от старта убивал ЛЕГАЛЬНЫЕ
+            # импорты посреди пачки (репорт: "timed out at [69/113]"). Теперь 20с
+            # от ПОСЛЕДНЕЙ напечатанной команды (застрявшая печать прогресс не двигает)
+            if ( $script:SendLastProgAt -ne $null -and ((Get-Date) - $script:SendLastProgAt).TotalSeconds -gt 20 ) {
+                $res = "send stalled at [$($ci+1)/$($cmds.Count)] - no typing progress for 20s, aborted"
                 break
             }
             $dots = "." * (1 + ($ci % 3))
@@ -625,11 +709,23 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
             }
             [GameCtl]::Tap([uint16]$VK['enter'])
             Trace-Type ("Enter after '" + $c + "'")
-            Wait-Pump 260
+            Wait-Pump 180
             $ci++
+            $script:SendLastProgAt = Get-Date   # v5.17.34: команда напечатана - прогресс есть
         }
         if ( $res -ne "" ) {
-            # рефокус не удался: В ИГРУ НЕ ТЫКАЕМ (клавиши ушли бы в чужое окно) - только стоп
+            # v5.17.34: при обрыве пачки терминал оставался ОТКРЫТЫМ с обрывком
+            # команды в строке ввода (ресурс "стирает" следующий импорт). Закрываем
+            # маркером PathPing, если фокус ещё в игре (Type-Command не печатает
+            # в чужое окно - при потерянном фокусе просто остаётся как был)
+            try {
+                if ( [GameCtl]::GetForegroundWindow() -eq $h ) {
+                    Type-Command "PathPing" $h
+                    [GameCtl]::Tap([uint16]$VK['enter'])
+                    Wait-Pump 200
+                    $script:ConsoleOpen = $false
+                }
+            } catch { }
             Stop-Spin
             Set-Status $res "warn"
             return $res
@@ -637,15 +733,26 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen) {
         # v5.17.8: консоль закрывает ИГРА изнутри по команде-маркеру PathPing (см. HPConsole).
         # Старый финальный grave-тап был тогглом: человеческий ` во время печати инвертировал
         # состояние консоли, и следующая пачка уходила в геймплей.
-        Trace-Type "sending PathPing (batch close)"
-        Type-Command "PathPing" $h
-        Trace-Type "PathPing typed"
-        [GameCtl]::Tap([uint16]$VK['enter'])
-        Trace-Type "Enter after PathPing"
-        Wait-Pump 260
-        # v5.17.32.3: PathPing закрывает терминал БЕЗУСЛОВНО (игровой патч
-        # HideConsole) - флаг сразу false, не дожидаясь скана CNST|CLOSE
-        $script:ConsoleOpen = $false
+        # v5.17.37: -KeepOpen пропускает закрытие: консоль остаётся запаркованной
+        # (невидимой), ConsoleOpen=true - следующая команда пропускает ensure-open.
+        # Закрытие - отложенный PathPing через 2.5с тишины (Arm-CloseTimer)
+        if ( $KeepOpen ) {
+            Trace-Type "keep-open: console stays parked (deferred close)"
+            $script:ConsoleOpen = $true
+            Arm-CloseTimer
+        }
+        else {
+            if ( $script:KeepOpenTimer -ne $null ) { $script:KeepOpenTimer.Stop() }
+            Trace-Type "sending PathPing (batch close)"
+            Type-Command "PathPing" $h
+            Trace-Type "PathPing typed"
+            [GameCtl]::Tap([uint16]$VK['enter'])
+            Trace-Type "Enter after PathPing"
+            Wait-Pump 180
+            # v5.17.32.3: PathPing закрывает терминал БЕЗУСЛОВНО (игровой патч
+            # HideConsole) - флаг сразу false, не дожидаясь скана CNST|CLOSE
+            $script:ConsoleOpen = $false
+        }
         # v5.17.30.9: grave-финал ОТМЕНЁН - живой тест показал: после PathPing
         # (HideConsole -> bShowConsole=false) grave проходит ветку "открыть" и
         # ОТКРЫВАЕТ терминал ВИДИМО в углу (10,10) - юзер видел открытое окно
@@ -696,6 +803,8 @@ $script:SeenSeqs = @{}      # "<gamepid>:<seq>" кадра -> seen
 $script:KeyTimes = @{}      # "<gamepid>:<seq>" кадра -> "HH:mm:ss" времени постановки
 $script:StampNextSync = $false
 $script:ScanCache = @{ Pid = 0; Regions = @(); LastSeq = 0 }   # кэш областей лог-буфера
+$script:ShrinkGuardSeq = -1   # v5.17.35.3: seq последнего срабатывания гарда усечения (анти-цикл)
+$script:HeadWindowMb = 16     # v5.17.35.5: окно головы быстрого скана, МБ (адаптивное)
 $script:CurrentMap = ""   # карта, где игра СЕЙЧАС (из MAP-событий)
 # v5.17.30: подкнопка "вернуться к кадрам" - флаги перехода и прибытия
 $script:KeyMapGoClicked = $false
@@ -755,6 +864,14 @@ function Read-SavedPathData {
 
 function Refresh-Table {
     # строки уже собраны в $script:KeyRows
+    # v5.17.35.5: пересборка ItemsSource (каждый синк с событиями подменяет коллекцию)
+    # УБИВАЛА открытую правку ячейки молча - TextBox умирал вместе со старыми
+    # row-объектами, CommitEdit становился no-op, CellEditEnding не срабатывал,
+    # команда в игру не уходила ("ввожу - а значение пропадает", репорт юзера).
+    # Коммит правки ДО сброса ItemsSource
+    if ( $script:EditingNow ) {
+        try { Commit-EditingCell } catch { }
+    }
     $dg = $controls['DgKeys']
     # v5.16.2: сохраняем выделение при перезагрузке таблицы: полный рескан после
     # удаления сбрасывал выделенную строку - несколько кадров подряд удалить нельзя
@@ -870,6 +987,11 @@ function Sync-FromLog([switch]$Force) {
         # "newMax <= LastSeq" наверху синка, и карта никогда не определялась.
         $script:ScanCache.LastSeq = 0
         $script:LastGen = 0
+        # v5.17.36: новый процесс игры = путь в ней ПУСТ (путь не переживает
+        # рестарт процесса). GameKeyCount = 0 СРАЗУ - иначе Play до первого дампа
+        # шёл мимо промпта записи кадров и игра молча отвечала "need at least
+        # 2 keys" (репорт: "запустил игру, в таблице данные, воспроизвести нельзя")
+        $script:GameKeyCount = 0
         $Force = $true
     }
     # защита от зависшего скана на ТОМ ЖЕ pid (процесс умер посреди чтения памяти)
@@ -901,7 +1023,10 @@ function Sync-FromLog([switch]$Force) {
     if ( $lf -ne "" ) {
         try {
             $txtLF = [System.IO.File]::ReadAllText($lf)
-            if ( $txtLF -ne "" ) { Complete-SyncFromLog $txtLF; return }
+            # v5.17.33.1: файл годится как источник только с PATHEV-событиями.
+            # Чужой .log (ucc-make-out.log был свежее игрового) "успешно" парсился
+            # в ПУСТОТУ и return'ил скан памяти - карта никогда не определялась
+            if ( $txtLF.Contains("PATHEV:") ) { Complete-SyncFromLog $txtLF; return }
         } catch { }
     }
     $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1029,7 +1154,20 @@ function Complete-SyncFromLogInner {
                 return
             }
             if ( $newGen -gt $script:LastGen ) { $script:ScanCache.LastSeq = 0 }
-            if ( $newMax -le $script:ScanCache.LastSeq ) { $txt = ""; $src = "" }
+            if ( $newMax -le $script:ScanCache.LastSeq ) {
+                # v5.17.35.5: даже БЕЗ новых событий карту нужно знать. Прежний код
+                # выбрасывал текст ДО разбора DUMPMAP: после рестарта панели CurrentMap
+                # оставался пустым навсегда (DUMPMAP-и в буфере есть, но парс пропущен),
+                # полл зондил PathDumpKeys каждые 5.4с, воровал фокус и блокировал
+                # отправки правок. Дёшево: последний MAP/DUMPMAP из текста
+                $lm2 = ""
+                foreach ( $mm2 in [regex]::Matches($txt, 'PATHEV:\d+:\d+\|(DUMPMAP|MAP)\|([0-9A-Za-z_]+)') ) { $lm2 = $mm2.Groups[2].Value }
+                if ( $lm2 -ne "" -and $script:CurrentMap -eq "" ) {
+                    $script:CurrentMap = $lm2
+                    Update-SelectionButtons
+                }
+                $txt = ""; $src = ""
+            }
         }
     }
     # v5.17.30.4: ДЕШЁВЫЙ гейт свежести ПЕРЕД тяжёлым парсом. Полные сканы всегда
@@ -1095,6 +1233,10 @@ function Complete-SyncFromLogInner {
         $genSwitch = ($maxGen -ne $script:LastGen)
         if ( $genSwitch ) {
             $script:LastGen = $maxGen
+            # v5.17.37: смена уровня = пересоздание Cam - bPathSmoothStop в игре
+            # сбросился в дефолт (True). Панель перешлёт PathSmoothStop при следующем
+            # Play, если желаемое состояние не дефолт
+            $script:SmoothSentState = 1
             # v5.17.30: KeyMap при смене поколения БОЛЬШЕ не стирается. Смена уровня
             # ВО ВРЕМЯ ИГРЫ (die-телепорт, переход-триггер) - кадры по-прежнему
             # принадлежат старой карте: лок кнопок и подкнопка "вернуться к кадрам"
@@ -1147,6 +1289,12 @@ function Complete-SyncFromLogInner {
         # лога, реплей "всей истории" даёт фантомов и неверные индексы при DEL.
         $inDump = $false
         $dumpRows = New-Object System.Collections.ArrayList
+        # v5.17.35.3: был ли в скане ДАМП (снапшот истины) и были ли DEL - для гарда
+        # усечения ниже
+        $dumpSeen = $false
+        $delCount = 0
+        $replayKept = $false   # v5.17.37: реплей не отражает игру (гарды сохранили старые строки)
+        $keepGuard = $false    # v5.17.37.1: сработал гвард сохранения строк (GameKeyCount не трогаем)
         # v5.17.30.5: CLEAR в буфере = ЯВНАЯ очистка (краш/перезапуск игры её не пишет).
         # Сессионный флаг: старт-рестор бэкапа тоже не должен возвращать очищенное
         $hadClear = $false
@@ -1155,11 +1303,13 @@ function Complete-SyncFromLogInner {
                 'CLEAR' { $rows.Clear() | Out-Null; $script:KeyMap = ""; $script:KeyMapGoClicked = $false; $hadClear = $true; $script:SawClearInBuffer = $true }
                 'DEL'   {
                     $i = [int]$e.D
+                    $delCount++
                     if ( $i -ge 0 -and $i -lt $rows.Count ) { $rows.RemoveAt($i) }
                     if ( $rows.Count -eq 0 ) { $script:KeyMap = "" }
                 }
                 'DUMPBEGIN' {
                     $inDump = $true
+                    $dumpSeen = $true
                     $dumpRows = New-Object System.Collections.ArrayList
                 }
                 'DUMPMAP' {
@@ -1181,6 +1331,8 @@ function Complete-SyncFromLogInner {
                             $r.Pitch = [int][double]$p[5]
                             $r.FOV   = [double]$p[6]
                             if ( $p[7] -match $isNum ) { $r.Speed = [double]$p[7] } else { $r.Speed = 250 }
+                            # v5.17.35 (#9): 9-е поле дампа = hold (в старых дампах нет)
+                            if ( $p.Count -ge 9 -and $p[8] -match $isNum ) { $r.Hold = [double]$p[8] }
                             [void]$dumpRows.Add($r)
                             if ( $script:CurrentMap -ne "" ) { $script:KeyMap = $script:CurrentMap }
                         }
@@ -1201,6 +1353,11 @@ function Complete-SyncFromLogInner {
                         }
                         $rows = $dumpRows
                         $inDump = $false
+                        # v5.17.34: реальное число кадров у ИГРЫ (дамп = истина). Нужно
+                        # для честного Play: таблица может держать кадры из бэкапа
+                        # прошлой сессии, а путь в игре после рестарта ПУСТ - игра
+                        # молча отвечает "need at least 2 keys" и юзер видит "не стартует"
+                        $script:GameKeyCount = $dumpRows.Count
                     }
                 }
                 'MAP'   {
@@ -1211,9 +1368,32 @@ function Complete-SyncFromLogInner {
                     # v5.17.32.3 (#1): состояние терминала от игры (HPConsole
                     # ShowConsole/HideConsole пишут CNST|OPEN/CLOSE). Панель пропускает
                     # ensure-open, если терминал УЖЕ открыт юзером (Shift+grave
-                    # закрыл бы его и команды ушли бы в никуда)
+                    # закрыл бы его и команды ушли бы в геймплей)
                     $script:ConsoleOpen = ($e.D -eq "OPEN")
                     Trace-Type ("CNST " + $e.D + " (seq " + $e.Seq + ")")
+                }
+                'BOOK'  {
+                    # v5.17.37.2: меню-книга открыта/закрыта над уровнем (HPConsole
+                    # Tick пишет BOOK|1/0 при смене menuBook.bIsOpen). Все команды
+                    # блокируются с предупреждением, пока книга открыта
+                    $script:BookOpen = ($e.D -eq "1")
+                    Trace-Type ("BOOK " + $e.D + " (seq " + $e.Seq + ")")
+                }
+                'REJECTED' {
+                    # v5.17.37.3: игра ОТКЛОНИЛА команду (книга была открыта в момент
+                    # исполнения - знание панели могло отставать от скана). Модальное
+                    # предупреждение. Дедуп по seq: событие живёт в буфере и парсится
+                    # каждым синком - бокс только на НОВЫЙ seq
+                    if ( $e.Seq -gt $script:LastRejWarnSeq ) {
+                        $script:LastRejWarnSeq = $e.Seq
+                        Set-Status "the command was REJECTED - the menu-book was open over the level (close the book and retry)" "warn"
+                        try {
+                            $wH2 = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+                            if ( $wH2 -ne [IntPtr]::Zero ) { [GameCtl]::SetForegroundWindow($wH2) | Out-Null }
+                            $window.Activate()
+                            [System.Windows.MessageBox]::Show($window, $script:LocData[$script:Lang].RejWarn, "HP2 Machinima Panel", 'OK', 'Warning') | Out-Null
+                        } catch { }
+                    }
                 }
                 'PLAYEND' {
                     # v5.7: проигрывание закончилось само - гасим красный Stop
@@ -1242,6 +1422,12 @@ function Complete-SyncFromLogInner {
                     $pp = $e.D -split ','
                     $i = [int]$pp[0]
                     if ( $pp.Count -ge 2 -and $i -ge 0 -and $i -lt $rows.Count -and $pp[1] -match $isNum ) { $rows[$i].Speed = [double]$pp[1] }
+                }
+                'KEYHOLD' {
+                    # v5.17.35 (#9): пауза кадра (HoldApply пишет KEYHOLD|i,seconds)
+                    $pp = $e.D -split ','
+                    $i = [int]$pp[0]
+                    if ( $pp.Count -ge 2 -and $i -ge 0 -and $i -lt $rows.Count -and $pp[1] -match $isNum ) { $rows[$i].Hold = [double]$pp[1] }
                 }
                 'INS'   {
                     # вставка кадра по индексу: INS|i,x,y,z,yaw,pitch,fov,spd
@@ -1335,6 +1521,30 @@ function Complete-SyncFromLogInner {
         if ( $lm.Success ) { $script:CurrentMap = $lm.Groups[1].Value }
         Update-MapPreview
 
+        # v5.17.35.3: ПОТЕРЯ КАДРОВ ПРИ ПРОИГРЫВАНИИ (репорт: "2-3 точки просто
+        # удалились"). Быстрый скан читает только ГОЛОВУ каждого региона: когда
+        # кольцевой буфер дорастает, старые ADD уходят из окна, реплей видимого
+        # куска даёт МЕНЬШЕ строк, чем в таблице, и таблица молча перезаписывается
+        # усечённым множеством. В скане НЕТ DEL/CLEAR и НЕТ дампа => урезание
+        # недостоверно: сохраняем прежние строки.
+        # v5.17.35.5: вместо полного скана (он давал "обновление в 10 раз дольше" -
+        # гард срабатывал на КАЖДОЕ новое событие) - УДВОЕНИЕ окна головы
+        # (16->32->...->256МБ) и перескан по кэшу областей. Полный скан не нужен:
+        # окно больше буфера = все события видны. Потолок 256МБ: если и там
+        # усечение (события вытеснены из буфера целиком) - истину вернёт дамп
+        if ( -not $dumpSeen -and $delCount -eq 0 -and -not $hadClear -and $rows.Count -gt 0 -and $rows.Count -lt $script:KeyRows.Count ) {
+            $rows = $script:KeyRows
+            $replayKept = $true
+            $keepGuard = $true
+            if ( $script:HeadWindowMb -lt 256 ) {
+                $script:HeadWindowMb = $script:HeadWindowMb * 2
+                try {
+                    [MemScanPanel]::SetHeadWindow($script:HeadWindowMb * 1MB)
+                    Sync-FromLog
+                    return
+                } catch { }
+            }
+        }
         # v5.17.17: путь в игре ПУСТ (дамп 0 кадров), а в панели есть кадры той же
         # карты и пользователь не давал явную очистку - игра перезапустилась после
         # краша/закрытия: кадры СОХРАНЯЕМ (требование #backup: в панели всё живёт,
@@ -1348,8 +1558,10 @@ function Complete-SyncFromLogInner {
         # остаётся. Живой случай: F11 очистил путь (CLEAR seq 46 в буфере), панель
         # вернула кадры обратно - юзер: "нажал очистку - ничего не произошло"
         if ( $rows.Count -eq 0 -and $script:KeyRows.Count -gt 0 -and -not $script:UserClearPending -and -not $hadClear ) {
+            $keepGuard = $true
             if ( $prevKeyMap -ne "" -and $prevKeyMap -eq $script:CurrentMap ) {
                 $rows = $script:KeyRows
+                $replayKept = $true
                 $script:KeyMap = $prevKeyMap
                 # v5.17.30: вернулись на карту кадров после подкнопки - путь игры пуст
                 # (дамп 0 кадров), предложим записать кадры в игру (промпт в конце синка)
@@ -1365,6 +1577,15 @@ function Complete-SyncFromLogInner {
         $wasClear = $script:UserClearPending
         $script:UserClearPending = $false
         $script:KeyRows = $rows
+        # v5.17.37: GameKeyCount = число кадров у игры ИЗ РЕПЛЕЯ, а не только из
+        # дампа. Прежний код обновлял счётчик только на DUMPEND - после рестарта
+        # игры он висел на 0 и промпт "Restore path" выскакивал на каждый Play,
+        # даже когда кадры добавлены с нуля через F8 (репорт юзера). v5.17.37.1:
+        # ФИНАЛЬНЫЙ ФИКС - условие "not dumpSeen" было мёртвым: probe-дампы сидят
+        # в буфере постоянно, dumpSeen всегда true, обновление не выполнялось.
+        # Теперь: обновляем из реплея ВСЕГДА, кроме гвардов (там строки - старые
+        # объекты панели, не игры; истина остаётся от DUMPEND=0 или прошлого синка)
+        if ( -not $keepGuard ) { $script:GameKeyCount = $rows.Count }
         Refresh-Table
         # v5.17.28.5: current level = last MAP event of the buffer. The frontend
         # ("Play Map!") writes MAP BEFORE the generation increment, so the maxGen
@@ -1415,7 +1636,10 @@ function Find-LogFile {
     $cut = (Get-Date).AddHours(-12)
     $best = $null
     Get-ChildItem -Path "F:\Harry Potter and the Chamber of Secrets\system" -Filter "*.log" -ErrorAction SilentlyContinue | ForEach-Object {
-        if ( $_.Name -match '^(WS_FTP|uninstal)' ) { return }
+        # v5.17.33.1: 'ucc' - лог компиляции (ucc-make-out.log) отбирался как самый
+        # свежий *.log и ОТРАВЛЯЛ синк: панель читала пустой от PATHEV файл, до
+        # скана памяти дело не доходило - вечный зонд и серые кнопки
+        if ( $_.Name -match '^(WS_FTP|uninstal|ucc)' ) { return }
         if ( $_.LastWriteTime -gt $cut ) {
             if ( $best -eq $null -or $_.LastWriteTime -gt $best.LastWriteTime ) { $best = $_ }
         }
@@ -2060,6 +2284,9 @@ function Send-PathSaveAndSync([string]$prefix) {
         <DataGridTextColumn Header="Pitch" Width="44" Binding="{Binding Pitch}" IsReadOnly="True"/>
         <DataGridTextColumn Header="FOV" Width="36" Binding="{Binding FOV}"/>
         <DataGridTextColumn Header="Speed" Width="*" Binding="{Binding Speed}" IsReadOnly="False"/>
+        <!-- v5.17.35 (#9): пауза на кадре (сек). Во время паузы камера чуть парит
+             на месте (едва заметный дрейф, игровой патч), а не стоит мёртво -->
+        <DataGridTextColumn Header="Hold" Width="44" Binding="{Binding Hold, StringFormat=F1}" IsReadOnly="False"/>
         <DataGridTemplateColumn Width="26">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
@@ -2130,6 +2357,9 @@ function Send-PathSaveAndSync([string]$prefix) {
         <Button Name="BtnPathPlaySpeed" Content="▶  Play" Background="#CBA6F7"
                 Foreground="#1E1E2E" FontSize="16" FontWeight="Bold" HorizontalAlignment="Stretch"
                 HorizontalContentAlignment="Left" Padding="18,4" Margin="0,0,0,6" ToolTipService.ShowOnDisabled="True"/>
+        <!-- v5.17.36: плавный старт/стоп пролёта (игровая команда PathSmoothStop) -->
+        <CheckBox Name="CbPathSmooth" Content="Smooth stop" Foreground="{DynamicResource MutedBrush}"
+                  Margin="0,0,0,6" HorizontalAlignment="Left" FontSize="12"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
         <!-- v5.17.27: большая кнопка карты. MAP-метка видна ТОЛЬКО пока карта не
              загружена (тогда в карточке только метка справа сверху, кнопка серая);
@@ -2273,7 +2503,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -2731,7 +2961,10 @@ function Push-KeysToGame {
         $pt = [long]$r.Pitch; $pt = (($pt % 65536) + 65536) % 65536
         $fv = [int][math]::Round($r.FOV)
         $sp = [int][math]::Round($r.Speed)
-        $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddCommit")
+        # v5.17.35 (#9): пауза кадра (сек -> десятые), только если ненулевая
+        $hv = [int][math]::Round($r.Hold * 10)
+        if ( $hv -gt 0 ) { $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddHoldVal $hv","AddCommit") }
+        else { $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddCommit") }
     }
     $st = Send-GameCommands $cmds
     Sync-AfterCommand ("pushed $($script:KeyRows.Count) keys to the game | $st")
@@ -2743,7 +2976,7 @@ function Prompt-PushKeysAfterArrival {
         if ( $script:KeyRows.Count -eq 0 ) { return }
         if ( $script:CurrentMap -eq "" -or $script:CurrentMap -ne $script:KeyMap ) { return }
         $L = $script:LocData[$script:Lang]
-        $r = [System.Windows.MessageBox]::Show(($L.PushKeysQ -f $script:KeyRows.Count), $L.PushKeysTitle, 'YesNo', 'Question')
+        $r = [System.Windows.MessageBox]::Show($window, ($L.PushKeysQ -f $script:KeyRows.Count), $L.PushKeysTitle, 'YesNo', 'Question')
         if ( $r -eq 'Yes' ) { Push-KeysToGame }
         else { Set-Status $L.PushKeysNo }
     } catch { }
@@ -2834,6 +3067,7 @@ function Start-PlayFallback([double]$dur) {
 }
 function Get-PathTotalDur {
     # как PathPlaySpeedPath в игре: сумма (дистанция / скорость кадра)
+    # v5.17.35 (#9): + паузы кадров (hold на КАЖДОМ кадре, включая первый и последний)
     $tot = 0.0
     for ( $i = 0; $i -lt $script:KeyRows.Count - 1; $i++ ) {
         $a = $script:KeyRows[$i]; $b = $script:KeyRows[$i + 1]
@@ -2844,11 +3078,21 @@ function Get-PathTotalDur {
         if ( $seg -lt 0.05 ) { $seg = 0.05 }
         $tot += $seg
     }
+    foreach ( $r in $script:KeyRows ) { if ( $r.Hold -gt 0 ) { $tot += $r.Hold } }
     return $tot
 }
 function Do-PathPlay {
     # v5.17.30: кадры с другой карты - проигрывать нельзя (и F9 тоже)
     if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
+    # v5.17.35.1: у игры путь ПУСТ, а в таблице кадры (бэкап при старте панели /
+    # правки до пуша). Кадры хранятся, пока юзер сам их не удалит (#backup), поэтому
+    # не блокируем Play - предлагаем записать кадры в игру и продолжаем пролёт
+    if ( $script:GameKeyCount -eq 0 -and $script:KeyRows.Count -gt 0 ) {
+        $L = $script:LocData[$script:Lang]
+        $r = [System.Windows.MessageBox]::Show($window, ($L.PushKeysQ -f $script:KeyRows.Count), $L.PushKeysTitle, 'YesNo', 'Question')
+        if ( $r -ne 'Yes' ) { Set-Status $L.PushKeysNo; return }
+        Push-KeysToGame
+    }
     # один кадр = просто перейти к нему (игра требует минимум 2 для проигрывания)
     if ( $script:KeyRows.Count -eq 1 ) {
         $st = Send-GameCommand "PathGoto 0"
@@ -2871,7 +3115,15 @@ function Do-PathPlay {
     if ( $script:ObsAutoRec -and [ObsWs]::Connected -and -not [ObsWs]::Recording ) {
         if ( [ObsWs]::Request("StartRecord") ) { $obsPreRoll = $true; Set-Status "OBS: recording (pre-roll)"; Update-ObsButton }
     }
-    $st = Send-GameCommand "PathPlaySpeed"
+    # v5.17.37: PathSmoothStop шлём ТОЛЬКО когда желаемое состояние не совпадает
+    # с уже отправленным (игра помнит флаг до пересоздания Cam на смене уровня).
+    # Play = ОДНА команда ~0.9с вместо двух ~2.5с
+    $wantSmooth = $(if ( $script:PathSmooth ) { 1 } else { 0 })
+    $playCmds = @()
+    if ( $script:SmoothSentState -ne $wantSmooth ) { $playCmds += @("PathSmoothStop $wantSmooth") }
+    $playCmds += @("PathPlaySpeed")
+    $st = Send-GameCommands $playCmds
+    $script:SmoothSentState = $wantSmooth
     if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback (Get-PathTotalDur) }
     else {
         if ( $obsPreRoll -and [ObsWs]::Recording ) { [void][ObsWs]::Request("StopRecord") }   # дубль не состоялся
@@ -2882,6 +3134,13 @@ function Do-PathPlay {
 function Do-PathPlayTime {
     # v5.17.30: кадры с другой карты - проигрывать нельзя
     if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
+    # v5.17.35.1: у игры путь ПУСТ (см. Do-PathPlay) - предлагаем записать кадры
+    if ( $script:GameKeyCount -eq 0 -and $script:KeyRows.Count -gt 0 ) {
+        $L = $script:LocData[$script:Lang]
+        $r = [System.Windows.MessageBox]::Show($window, ($L.PushKeysQ -f $script:KeyRows.Count), $L.PushKeysTitle, 'YesNo', 'Question')
+        if ( $r -ne 'Yes' ) { Set-Status $L.PushKeysNo; return }
+        Push-KeysToGame
+    }
     # один кадр = просто перейти к нему
     if ( $script:KeyRows.Count -eq 1 ) {
         $st = Send-GameCommand "PathGoto 0"
@@ -2901,8 +3160,17 @@ function Do-PathPlayTime {
     if ( $script:ObsAutoRec -and [ObsWs]::Connected -and -not [ObsWs]::Recording ) {
         if ( [ObsWs]::Request("StartRecord") ) { $obsPreRoll = $true; Set-Status "OBS: recording (pre-roll)"; Update-ObsButton }
     }
-    $st = Send-GameCommand "PathPlay $sec"
-    if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback ([double]$sec) }
+    # v5.17.37: PathSmoothStop только при смене состояния (см. Do-PathPlay)
+    $wantSmooth = $(if ( $script:PathSmooth ) { 1 } else { 0 })
+    $playCmds = @()
+    if ( $script:SmoothSentState -ne $wantSmooth ) { $playCmds += @("PathSmoothStop $wantSmooth") }
+    $playCmds += @("PathPlay $sec")
+    $st = Send-GameCommands $playCmds
+    $script:SmoothSentState = $wantSmooth
+    # v5.17.35 (#9): fallback-таймер = N сек полёта + сумма пауз кадров
+    $hs = 0.0
+    foreach ( $r in $script:KeyRows ) { $hs += [double]$r.Hold }
+    if ( $st -like "*OK*" ) { Set-Playing $true; Start-PlayFallback ([double]$sec + $hs) }
     else {
         if ( $obsPreRoll -and [ObsWs]::Recording ) { [void][ObsWs]::Request("StopRecord") }   # дубль не состоялся
         if ( -not $script:Playing ) { $controls['BtnPathStop'].IsEnabled = $false; $controls['BtnPathStop'].Background = $window.Resources['PanelBrush']; $controls['BtnPathStop'].Foreground = $window.Resources['TextBrush'] }
@@ -2950,9 +3218,12 @@ $controls['BtnPathClear'].Add_Click({
     Sync-AfterCommand $st
 })
 $controls['BtnRefresh'].Add_Click({
-    # v5.17: обновить = истина от игры: запрашиваем снапшот пути, затем полный скан
+    # v5.17: обновить = истина от игры: запрашиваем снапшот пути, затем скан.
+    # v5.17.35.5: БЫСТРЫЙ скан вместо полного - полный при выросшей памяти игры
+    # занял 165с (репорт "обновляется в 10 раз дольше"). Дамп = истина, быстрый
+    # скан с адаптивным окном его читает; усечение ловит гард окна
     if ( (Get-Process Game -ErrorAction SilentlyContinue) -ne $null ) { Send-GameCommand "PathDumpKeys" | Out-Null }
-    Sync-FromLog -Force
+    Sync-FromLog
 })
 # ---------- v5.17.11: зелёные "+" РОВНО НА СТЫКАХ строк ----------
 # ПЛЮСИКИ ЖИВУТ В ШАБЛОНЕ КОЛОНКИ # (см. XAML): кнопка центрирована на ВЕРХНЕЙ
@@ -3277,12 +3548,13 @@ $controls['BtnExport'].Add_Click({
     $dlg.FileName = "$($script:KeyMap).hp2path"
     if ( $dlg.ShowDialog() ) {
         # v5.17.3: 8-е поле - время постановки кадра (переживает экспорт/импорт).
+        # v5.17.35 (#9): 9-е поле - пауза на кадре в секундах (старые файлы без него = 0).
         # Числа - через InvariantCulture: -f с ru-RU культурой пишет "195,153931"
         # (запятая = десятичный разделитель) и рвёт CSV на лишние поля
         $inv = [System.Globalization.CultureInfo]::InvariantCulture
-        $lines = @("# map=$($script:CurrentMap)  format: x,y,z,yaw,pitch,fov,speed,time")
+        $lines = @("# map=$($script:CurrentMap)  format: x,y,z,yaw,pitch,fov,speed,time[,hold]")
         foreach ( $r in $script:KeyRows ) {
-            $lines += ($r.X.ToString($inv) + "," + $r.Y.ToString($inv) + "," + $r.Z.ToString($inv) + "," + $r.Yaw.ToString($inv) + "," + $r.Pitch.ToString($inv) + "," + $r.FOV.ToString($inv) + "," + $r.Speed.ToString($inv) + "," + $r.Time)
+            $lines += ($r.X.ToString($inv) + "," + $r.Y.ToString($inv) + "," + $r.Z.ToString($inv) + "," + $r.Yaw.ToString($inv) + "," + $r.Pitch.ToString($inv) + "," + $r.FOV.ToString($inv) + "," + $r.Speed.ToString($inv) + "," + $r.Time + "," + $r.Hold.ToString($inv))
         }
         try {
             [System.IO.File]::WriteAllLines($dlg.FileName, $lines)
@@ -3337,7 +3609,12 @@ $controls['BtnImport'].Add_Click({
                     $pt = [long][double]$p[4]; $pt = (($pt % 65536) + 65536) % 65536
                     $fv = [int][math]::Round([double]$p[5])
                     $sp = [int][math]::Round([double]$p[6])
-                    $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddCommit")
+                    # v5.17.35 (#9): пауза кадра из 9-го поля (сек -> десятые; старые
+                    # файлы без 9-го поля = hold 0). AddHoldVal льёт в StagedKey.fHold
+                    $hv = 0
+                    if ( $p.Count -ge 9 -and $p[8] -match '^\d+(\.\d+)?$' ) { $hv = [int][math]::Round([double]$p[8] * 10) }
+                    if ( $hv -gt 0 ) { $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddHoldVal $hv","AddCommit") }
+                    else { $cmds += @("AddX $xk","AddY $yk","AddZ $zk","AddYaw $yw","AddPitch $pt","AddFov $fv","AddSpd $sp","AddCommit") }
                     $n++
                     # v5.17.3: время постановки из 8-го поля (если валидное)
                     $t = ""
@@ -3389,39 +3666,85 @@ $controls['BtnClose'].Add_Click({ $window.Close() })
 # Координаты в игре менять нечем, они локальные
 $script:EditingNow = $false
 
+# v5.17.35.5: отправка значения ячейки в игру - общий путь для CellEditEnding
+# (Enter/нативный коммит) и preview-коммита при клике мимо строк (там CommitEdit
+# не работает: классовый обработчик DataGrid отменяет правку раньше)
+function Send-CellValue([object]$row, [string]$hdr, [string]$val) {
+    try {
+        if ( $row -eq $null ) { return }
+        $n = $row.Num
+        # v5.17.35.5: дедуп двойного коммита (CellEditEnding и preview-коммит могут
+        # сработать на одном и том же клике в пределах миллисекунд - две пачки
+        # SpeedIdx в игру = два лишних открытия консоли)
+        $ck = $hdr + "|" + $val + "|" + $n
+        if ( $script:LastCommitKey -eq $ck -and $script:LastCommitAt -ne $null -and ((Get-Date) - $script:LastCommitAt).TotalMilliseconds -lt 2000 ) {
+            Trace-Type ("editCommit dedup: " + $ck)
+            return
+        }
+        $script:LastCommitKey = $ck
+        $script:LastCommitAt = Get-Date
+        Trace-Type ("editCommit hdr=" + $hdr + " val=" + $val + " row=" + $n)
+        if ( $hdr -eq "Time" ) {
+            if ( $val -match '^\d{2}:\d{2}:\d{2}$' ) {
+                $inv = [System.Globalization.CultureInfo]::InvariantCulture
+                $sk = $row.X.ToString('F1', $inv) + ";" + $row.Y.ToString('F1', $inv) + ";" + $row.Z.ToString('F1', $inv)
+                $script:KeyTimes[$sk] = $val
+            }
+            return
+        }
+        if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null -or $script:CurrentMap -eq "" ) { Trace-Type "editCommit skipped: no game/map"; return }
+        # v5.17.37: ПАЧЕЧНАЯ ОДНА КОМАНДА на правку ("idx:val", игра парсит сама) +
+        # -KeepOpen (консоль остаётся запаркованной, закрытие отложено) + БЕЗ
+        # Sync-AfterCommand (значение уже в таблице, событие придёт с поллом).
+        # Правка = ~0.9с вместо 6-8с
+        if ( $hdr -eq "FOV" -and $val -match '^\d+(\.\d+)?$' ) {
+            $fv = [int][math]::Round([double]$val)
+            Send-GameCommands @("FovSet ${n}:${fv}") -KeepOpen | Out-Null
+        }
+        if ( $hdr -eq "Speed" -and $val -match '^\d+(\.\d+)?$' ) {
+            $sv = [int][math]::Round([double]$val)
+            Send-GameCommands @("SpeedSet ${n}:${sv}") -KeepOpen | Out-Null
+        }
+        # v5.17.35 (#9): пауза на кадре в СЕКАХ (игра хранит float, канала
+        # печати - десятые: HoldSet 15 = 1.5s)
+        if ( $hdr -eq "Hold" -and $val -match '^\d+(\.\d+)?$' ) {
+            $hv = [int][math]::Round([double]$val * 10)
+            Send-GameCommands @("HoldSet ${n}:${hv}") -KeepOpen | Out-Null
+        }
+    } catch { Trace-Type ("editCommit error: " + $_.Exception.Message) }
+}
+
 $controls['DgKeys'].Add_CellEditEnding({
     param($sender, $e)
     try {
+        # v5.17.35.5: диагностика - КАК заканчивается правка (репорт "не сохраняется")
+        Trace-Type ("CellEditEnding action=" + $e.Action + " hdr=" + $e.Column.Header)
         # v5.17.30.9h: коммит ТОЛЬКО при Commit-действии (Escape = Cancel - команды
         # не слать). И сразу Sync-AfterCommand - таблица обновлялась только через
         # полл ~5.4с (юзер: "значение не обновилось после правки FOV")
-        if ( $e.Action -ne [System.Windows.Controls.DataGridEditAction]::Commit ) { return }
+        # v5.17.35.5: ГЛАВНЫЙ КОРЕнь "не сохраняются": при коммите кликом мимо строк
+        # DataGrid raises CellEditEnding с $e.Action = NULL (проверено живым трейсом
+        # 'action= hdr=Speed') - гейт "Action -ne Commit" МОЛЧА отбрасывал КОММИТ.
+        # Шлём всегда, кроме ЯВНОГО Cancel (Escape)
+        if ( $e.Action -ne $null -and [string]$e.Action -eq "Cancel" ) { return }
         $row = $e.Row.Item
         if ( $row -eq $null ) { return }
         $n = $row.Num
         $hdr = [string]$e.Column.Header
         $val = ""
         try { $val = $e.EditingElement.Text } catch { }
+        Trace-Type ("editCommit hdr=" + $hdr + " val=" + $val + " row=" + $n)
+        # v5.17.35.5: КОРЕНЬ "правки не сохраняются" (с v5.17.30.9h!). [Action]-
+        # замыкание НЕ ВИДИТ локальные переменные обработчика (динамический скоуп
+        # PS - см. комментарий v5.17.21.3): $row/$hdr/$val внутри были $null,
+        # Send-CellValue молча возвращался, команда в игру не уходила НИКОГДА.
+        # Передача через script:-переменные (как $script:EditCell)
+        $script:CommitRow = $row
+        $script:CommitHdr = $hdr
+        $script:CommitVal = $val
         $window.Dispatcher.BeginInvoke([Action]{
             try {
-                if ( $hdr -eq "Time" ) {
-                    if ( $val -match '^\d{2}:\d{2}:\d{2}$' ) {
-                        $inv = [System.Globalization.CultureInfo]::InvariantCulture
-                        $sk = $row.X.ToString('F1', $inv) + ";" + $row.Y.ToString('F1', $inv) + ";" + $row.Z.ToString('F1', $inv)
-                        $script:KeyTimes[$sk] = $val
-                    }
-                    return
-                }
-                if ( (Get-Process Game -ErrorAction SilentlyContinue) -eq $null -or $script:CurrentMap -eq "" ) { return }
-                if ( $hdr -eq "FOV" -and $val -match '^\d+(\.\d+)?$' ) {
-                    $fv = [int][math]::Round([double]$val)
-                    Send-GameCommands @("FovIdx $n","FovVal $fv","FovApply") | Out-Null
-                }
-                if ( $hdr -eq "Speed" -and $val -match '^\d+(\.\d+)?$' ) {
-                    $sv = [int][math]::Round([double]$val)
-                    Send-GameCommands @("SpeedIdx $n","SpeedVal $sv","SpeedApply") | Out-Null
-                }
-                Sync-AfterCommand ""
+                Send-CellValue $script:CommitRow $script:CommitHdr $script:CommitVal
             } catch { }
         }) | Out-Null
     } catch { }
@@ -3437,6 +3760,8 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
     param($s, $e)
     try {
         $dg = $controls['DgKeys']
+        # v5.17.35.5: диагностика потока правки отключена (спам на каждый клик);
+        # рабочие трейсы: BeginEdit, CellEditEnding action=, editCommit
         # ячейка под курсором: у DataGrid НЕТ свойства IsEditing - проверять надо
         # на самой ячейке ($cell.IsEditing), иначе обработчик тихо падал в catch
         $cell = $null
@@ -3476,12 +3801,12 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
             try { $null = [System.Windows.Input.Keyboard]::Focus($controls['BtnRefresh']) } catch { }
             $script:EditingNow = $false
             if ( $cell -eq $null ) {
-                $window.Dispatcher.BeginInvoke([Action]{
-                    try {
-                        try { $null = [System.Windows.Input.Keyboard]::Focus($controls['BtnRefresh']) } catch { }
-                        $controls['DgKeys'].CommitEdit()
-                    } catch { }
-                }) | Out-Null
+                # v5.17.35.5: коммит СИНХРОННО в preview-фазе, МИМО CommitEdit.
+                # Классовый обработчик DataGrid обрабатывает этот же клик ПОСЛЕ preview
+                # и ОТМЕНЯЕТ правку (клик мимо строк = cancel) - любой отложенный
+                # CommitEdit становился no-op. Прямой путь через Commit-EditingCell
+                Trace-Type "preview commit (empty-space click)"
+                try { Commit-EditingCell } catch { }
                 return
             }
         }
@@ -3505,14 +3830,11 @@ $dgKeysEditHandler = [System.Windows.Input.MouseButtonEventHandler]{
             try {
                 $dgv = $controls['DgKeys']
                 $dgv.CurrentCell = New-Object System.Windows.Controls.DataGridCellInfo($script:EditCell)
-                $dgv.BeginEdit()
+                $beOk = $dgv.BeginEdit()
                 $script:EditingNow = $true
                 # каретка в конец, текст не выделен - выделение только по двойному клику
                 $tb = Find-VisualChildOfType $script:EditCell ([System.Windows.Controls.TextBox])
-                if ( $tb -ne $null ) {
-                    $tb.SelectionLength = 0
-                    $tb.CaretIndex = $tb.Text.Length
-                }
+                Trace-Type ("BeginEdit ok=" + $beOk + " textbox=" + ($tb -ne $null))
                 # v5.17.21.2: клик по другой ячейке ПРИ активной правке - native commit
                 # предыдущей строки может ещё не завершиться к этому моменту, BeginEdit
                 # молча отказывает. Повторяем попытку, пока TextBox не появится (3x60ms)
@@ -3571,9 +3893,56 @@ $window.Add_PreviewMouseLeftButtonDown({
 # v5.17.20: коммит правки строки с ВЫВОДОМ фокуса из TextBox. Без этого CommitEdit
 # коммитит, но фокус остаётся в ячейке и DataGrid МОМЕНТАЛЬНО входит в правку
 # заново (известное поведение) - "правка застревала" навсегда
+function Commit-EditingCell {
+    # v5.17.35.5: надёжный коммит открытой правки БЕЗ CommitEdit (он NRE-ит на
+    # пересозданных контейнерах и превращается в no-op - значение терялось молча,
+    # репорт "ввожу - не сохраняется"). Прямой путь: найди TextBox правки в гриде,
+    # прочитай текст (колонка = Path биндинга, строка = DataContext), запиши в
+    # row-объект и отправь в игру. Вызывается ДО пересборки таблицы (Refresh-Table),
+    # пока TextBox ещё жив
+    try {
+        $tb = Find-VisualChildOfType $controls['DgKeys'] ([System.Windows.Controls.TextBox])
+        if ( $tb -eq $null ) {
+            # v5.17.35.5: грид-поиск пуст - ищем от всего окна (бывает в попапах/адорнерах)
+            $tb = Find-VisualChildOfType $window ([System.Windows.Controls.TextBox])
+            if ( $tb -ne $null ) { Trace-Type "direct commit: textbox found at window level" }
+        }
+        if ( $tb -eq $null ) { Trace-Type "direct commit: no TextBox in grid"; return }
+        $hdr = ""
+        try {
+            $bexp = $tb.GetBindingExpression([System.Windows.Controls.TextBox]::TextProperty)
+            if ( $bexp -ne $null -and $bexp.ParentBinding -ne $null ) { $hdr = [string]$bexp.ParentBinding.Path.Path }
+        } catch { Trace-Type "direct commit: binding path failed" }
+        if ( $hdr -eq "" ) {
+            $c3 = $tb
+            while ( $c3 -ne $null ) {
+                if ( $c3 -is [System.Windows.Controls.DataGridCell] ) { $hdr = [string]$c3.Column.Header; break }
+                $c3 = [Windows.Media.VisualTreeHelper]::GetParent($c3)
+            }
+        }
+        if ( $hdr -eq "" -and $script:EditCell -ne $null ) {
+            try { $hdr = [string]$script:EditCell.Column.Header } catch { }
+        }
+        if ( $hdr -eq "" ) { Trace-Type "direct commit: hdr unknown"; return }
+        $val = $tb.Text
+        $row = $tb.DataContext
+        if ( $row -eq $null ) { Trace-Type "direct commit: row null"; return }
+        Trace-Type ("direct commit hdr=" + $hdr + " val=" + $val)
+        switch ( $hdr ) {
+            "FOV"   { try { $row.FOV = [double]$val } catch { } }
+            "Speed" { try { $row.Speed = [double]$val } catch { } }
+            "Hold"  { try { $row.Hold = [double]$val } catch { } }
+        }
+        $script:EditingNow = $false
+        Send-CellValue $row $hdr $val
+    } catch { Trace-Type ("direct commit error: " + $_.Exception.Message) }
+}
+
 function Commit-RowEdit {
     # фокус на ВНЕШНЮЮ фокусируемую кнопку: DataGrid САМ коммитит по потере фокуса
     # (нативный путь, без re-entry в edit)
+    Trace-Type "Commit-RowEdit called"
+    try { Commit-EditingCell } catch { }
     try { $null = [System.Windows.Input.Keyboard]::Focus($controls['BtnRefresh']) } catch { }
     try {
         # ВАЖНО: перегрузка CommitEdit(unit, cancelEdits) падает NRE, если CurrentCell
@@ -4277,7 +4646,27 @@ $window.Add_Loaded({
                     # ВОССТАНАВЛИВАЛО кадры сразу после их удаления (юзер: "нажал
                     # очистку - ничего не произошло": в игре путь пуст, в таблице
                     # те же кадры). Живая проверка буфера: CLEAR исполнился игрой
+                    # v5.17.37: ПОДТВЕРЖДЕНИЕ - хоткей можно нажать случайно в игре
+                    # (репорт юзера "можно мисскликнуть"). Кнопка корзины на панели -
+                    # осознанный клик, там подтверждения нет
                     $window.Dispatcher.BeginInvoke([Action]{
+                        # v5.17.37.2: 0 кадров - удалять нечего: ни бокса, ни фокуса
+                        if ( $script:KeyRows.Count -eq 0 ) {
+                            Set-Status "table: 0 keys - nothing to clear"
+                            return
+                        }
+                        $L = $script:LocData[$script:Lang]
+                        # v5.17.37.1: F11 нажат В ИГРЕ - игра держит фокус, и бокс
+                        # появляется БЕЗ фокуса (Windows foreground-lock не даёт
+                        # фоновому процессу его перехватить): Enter уходил в игру.
+                        # Забираем фокус в панель перед боксом
+                        try {
+                            $wH = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+                            if ( $wH -ne [IntPtr]::Zero ) { [GameCtl]::SetForegroundWindow($wH) | Out-Null }
+                            $window.Activate()
+                        } catch { }
+                        $r = [System.Windows.MessageBox]::Show($window, ($L.ClearQ -f $script:KeyRows.Count), $L.ClearTitle, 'YesNo', 'Warning')
+                        if ( $r -ne 'Yes' ) { Set-Status $L.ClearNo; return }
                         $script:UserClearPending = $true
                         $st = Send-GameCommand "PathClear"
                         Send-PathSaveAndSync $st
@@ -4381,7 +4770,7 @@ $controls['LogPopupBorder'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $scri
 $script:SelDep = @('BtnFovKey','BtnKeySpeed')
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed','BtnRefresh')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
 $script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
@@ -4563,6 +4952,10 @@ $controls['DgKeys'].AddHandler([System.Windows.UIElement]::MouseLeftButtonDownEv
             $cur = [System.Windows.Media.VisualTreeHelper]::GetParent($cur)
         }
         if ( -not $inRow ) {
+            # v5.17.35.4: клик мимо строк при активной правке ячейки ОТМЕНЯЛ её
+            # (Hold/FOV/Speed пропадали - репорт юзера). Коммитим правку ДО снятия
+            # выделения (фокус на BtnRefresh => DataGrid коммитит сам + CommitEdit)
+            try { Commit-RowEdit } catch { }
             $controls['DgKeys'].SelectedIndex = -1
             Update-SelectionButtons
         }
@@ -4607,6 +5000,11 @@ $script:PollInGame = 0
 $script:ObsPort = 4455
 $script:ObsPass = ""
 $script:ObsAutoRec = $false   # v5.17.31.4: REC с Play (галочка CbObsAuto)
+$script:GameKeyCount = -1     # v5.17.34: сколько кадров СЕЙЧАС у игры (из DUMPEND; -1 = дамп ещё не приходил)
+$script:PathSmooth = $true    # v5.17.36: плавный старт/стоп пролёта (галочка CbPathSmooth)
+$script:BookOpen = $false     # v5.17.37.2: меню-книга открыта над уровнем (BOOK|1/0 от игры)
+$script:LastRejWarnSeq = 0    # v5.17.37.3: seq последнего REJECTED-предупреждения (анти-спам)
+$script:SmoothSentState = 1   # v5.17.37: последнее отправленное в игру состояние (дефолт игры = 1)
 $script:ObsStopPending = $false   # v5.17.31.6: stop, не доставленный в конце кино
 $script:ObsPoll = 0
 $script:ObsSeenRunning = $false
@@ -4626,7 +5024,7 @@ $script:UiTimer.Add_Tick({
     # - игра вышла -> сброс карты/плей-состояния и лочка
     # - игра есть, уровень не определён -> полный рескан ловит MAP-событие уровня и разблокирует UI
     #   (иначе дедлок: кнопки заблокированы - синк сам не запустится)
-    $script:GamePoll = ($script:GamePoll + 1) % 60
+    $script:GamePoll = ($script:GamePoll + 1) % 30   # v5.17.37.3: 5.4с → 2.7с (быстрее ловим BOOK/состояние книги)
     if ( $script:GamePoll -eq 0 ) {
         $g = Get-Process Game -ErrorAction SilentlyContinue
         if ( $g -eq $null ) {
@@ -4640,13 +5038,13 @@ $script:UiTimer.Add_Tick({
         } elseif ( $script:SendBusy ) {
             # v5.17.30.2: ЖИВОЙ ФАКТ - отправка из пикера висела ~2 мин при норме ~5с
             # (SendBusy всё это время молча отбивал команды, юзер: "ничего не
-            # происходит"). Причина блокировки неясна - надёжный авто-борт: флаг
-            # старше 25с = отправка умерла, сбрасываем (нормальная печать <10с).
-            # v5.17.30.1: Sync-FromLog в этой ветке безопасен (сброс 20s-зависшего
-            # скана теперь достижим)
-            if ( $script:SendStartedAt -ne $null -and ((Get-Date) - $script:SendStartedAt).TotalSeconds -gt 60 ) {
+            # происходит"). v5.17.34: сброс по ПРОГРЕССУ, не по длительности - импорт
+            # 113 команд легально печатается ~1.5 мин, старый 60с-лимит сбрасывал флаг
+            # ПОСРЕДИ живой печати (сам цикл из-за SendDepth-гварда не бился, но статус
+            # пугал "timed out, try again")
+            if ( $script:SendLastProgAt -ne $null -and ((Get-Date) - $script:SendLastProgAt).TotalSeconds -gt 60 ) {
                 $script:SendBusy = $false
-                Set-Status "send timed out (>60s) - flag reset, try again" "warn"
+                Set-Status "send stalled (>60s no progress) - flag reset, try again" "warn"
             }
             Sync-FromLog
         } elseif ( $script:CurrentMap -eq "" ) {
@@ -4654,9 +5052,14 @@ $script:UiTimer.Add_Tick({
             # крошечный и MAP-событие уровня не выживает, а дамп несёт DUMPMAP.
             # v5.17.15: ПОЛЛ идёт мимо Confirm-GameActive - фоновые зонды не должны
             # воровать фокус и выходить из меню каждые 5.4с
+            # v5.17.35.5: пока бежит скан - НЕ зондим (каждый зонд крал фокус на ~1с;
+            # при полных сканах по 165с зонд бился непрерывно и рвал правки таблицы).
+            # И быстрый скан вместо полного: свежий DUMPMAP читается окном с кэшем
+            # областей, полный при выросшей памяти = 165с
+            if ( $script:SyncBusy ) { return }
             $script:ConfirmBypass = $true
             try { Send-GameCommand "PathDumpKeys" | Out-Null } finally { $script:ConfirmBypass = $false }
-            Sync-FromLog -Force
+            Sync-FromLog
         } else {
             # v5.17.30: игра на карте - полл обязан синкаться БЕЗ зонда. Раньше синков
             # в этом состоянии не было вообще: смена карты в игре (die-телепорт,
@@ -4742,7 +5145,12 @@ $script:LocData = @{
         MapWarnQ = "Switch map? The in-game path will be cleared (a backup copy stays in the panel - Import restores it)."
         KeyMapGo = "→  {0}"
         TipKeyMapGo = "The keyframes belong to '{0}', but another map is loaded - click to load '{0}' (the in-game path restarts; the keyframes stay in the panel)"
-        PushKeysQ = "Keyframes restored in the table, but the in-game path is empty after the map load.`nWrite {0} keyframes into the game now?"
+        PushKeysQ = "The table has {0} keyframes, but the in-game path is empty (the game was restarted?).`nWrite them into the game now? (typed command by command - may take a while)"
+        ClearQ = "Clear ALL {0} keyframes - in the game AND in the panel table?"
+        ClearTitle = "Clear path"
+        ClearNo = "clear cancelled (F11)"
+        InBookWarn = "You are in a menu-book - commands won't be executed. Close the book first, then retry"
+        RejWarn = "The command was REJECTED by the game: the menu-book was open at execution time. The value did not apply - close the book and retry"
         PushKeysTitle = "Restore path"
         PushKeysNo = "keyframes are in the table - use Import from file to write them into the game"
         TipObsNotRun = "OBS is not running"
@@ -4760,6 +5168,8 @@ $script:LocData = @{
         ObsEye = "Show or hide the password"
         ObsAuto = "REC with Play"
         ObsAutoTip = "Start OBS recording when playback starts, stop it when playback ends"
+        Smooth = "Smooth stop"
+        SmoothTip = "Smooth acceleration at the start of the flight and smooth deceleration to a stop at the final keyframe (game command PathSmoothStop)"
         TipObsRefresh = "Re-check the OBS connection now (the automatic check may lag while the panel is busy)"
         TipObsKey = "Set the OBS WebSocket password (same as in OBS: Tools -> WebSocket Server Settings)"
         TipObsNoPass = "OBS WebSocket needs a password: set it in OBS (Tools -> WebSocket Server Settings) and here via the key button"
@@ -4808,7 +5218,12 @@ $script:LocData = @{
         MapWarnQ = "Сменить карту? Путь в игре сбросится (копия кадров осталась в панели - восстановится через Импорт)."
         KeyMapGo = "→  {0}"
         TipKeyMapGo = "Кадры относятся к карте '{0}', но сейчас загружена другая - клик загрузит '{0}' (путь в игре перезапишется; кадры останутся в панели)"
-        PushKeysQ = "Кадры восстановлены в таблице, но путь в игре пуст после загрузки карты.`nЗаписать {0} кадров в игру сейчас?"
+        PushKeysQ = "В таблице {0} кадров, а путь в игре пуст (игра перезапускалась?).`nЗаписать кадры в игру сейчас? (печать по одной команде - займёт время)"
+        ClearQ = "Удалить все {0} кадров - в игре и в таблице панели?"
+        ClearTitle = "Очистка пути"
+        ClearNo = "очистка отменена (F11)"
+        InBookWarn = "Ты в меню-книге — команда не будет исполнена. Закрой книгу и повтори"
+        RejWarn = "Команда ОТКЛОНЕНА игрой: меню-книга была открыта в момент исполнения. Значение не применилось — закрой книгу и повтори"
         PushKeysTitle = "Восстановить путь"
         PushKeysNo = "кадры в таблице - для записи в игру используйте Импорт из файла"
         TipObsNotRun = "OBS не запущен"
@@ -4826,6 +5241,8 @@ $script:LocData = @{
         ObsEye = "Показать или скрыть пароль"
         ObsAuto = "REC вместе с Play"
         ObsAutoTip = "Запись OBS стартует вместе с воспроизведением и заканчивается при его окончании"
+        Smooth = "Плавный стоп"
+        SmoothTip = "Плавный разгон в начале пролёта и плавное торможение до нуля у финального кадра (игровая команда PathSmoothStop)"
         TipObsRefresh = "Перепроверить подключение OBS сейчас (автопроверка может отставать, пока панель занята)"
         TipObsKey = "Задать пароль OBS WebSocket (тот же, что в OBS: Сервис -> Настройки сервера WebSocket)"
         TipObsNoPass = "OBS WebSocket требует пароль: задай его в OBS (Сервис -> Настройки сервера WebSocket) и здесь кнопкой с ключом"
@@ -4881,6 +5298,8 @@ function Set-Lang([string]$lang) {
     # v5.17.31.4: чекбокс авто-записи "REC вместе с Play"
     $controls['CbObsAuto'].Content = $L.ObsAuto
     $controls['CbObsAuto'].ToolTip = $L.ObsAutoTip
+    $controls['CbPathSmooth'].Content = $L.Smooth
+    $controls['CbPathSmooth'].ToolTip = $L.SmoothTip
     # v5.17.31.8: тултип кнопки ⟳ ручной перепроверки
     $controls['BtnObsRefresh'].ToolTip = $L.TipObsRefresh
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
@@ -4912,7 +5331,7 @@ $script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
 $script:FavMaps = New-Object System.Collections.Generic.List[string]
 function Save-Settings {
     try {
-        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec } |
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec; smoothstop = $script:PathSmooth } |
             ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
 }
@@ -4935,6 +5354,8 @@ try {
     if ( $s.obspass -ne $null ) { $script:ObsPass = [string]$s.obspass }
     # v5.17.31.4: галочка "REC вместе с Play"
     if ( $s.obsautorec -ne $null ) { $script:ObsAutoRec = ($s.obsautorec -eq $true) }
+    # v5.17.36: галочка "Плавный стоп" (по умолчанию включена)
+    if ( $s.smoothstop -ne $null ) { $script:PathSmooth = ($s.smoothstop -eq $true) }
 } catch { }
 Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
@@ -4946,6 +5367,16 @@ try {
         $script:ObsAutoRec = ($controls['CbObsAuto'].IsChecked -eq $true)
         Save-Settings
         Set-Status $(if ( $script:ObsAutoRec ) { "OBS: recording will follow Play" } else { "OBS: manual recording only" })
+    })
+} catch { }
+
+# v5.17.36: чекбокс "Плавный стоп" (PathSmoothStop) - восстановление + сохранение
+try {
+    $controls['CbPathSmooth'].IsChecked = $script:PathSmooth
+    $controls['CbPathSmooth'].Add_Click({
+        $script:PathSmooth = ($controls['CbPathSmooth'].IsChecked -eq $true)
+        Save-Settings
+        Set-Status $(if ( $script:PathSmooth ) { "path: smooth start/stop ON" } else { "path: constant speed start/stop" })
     })
 } catch { }
 
