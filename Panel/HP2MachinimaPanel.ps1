@@ -4114,12 +4114,14 @@ function Start-LaunchSequence([string]$map) {
     $script:LaunchSeq = @{ Map = $map; Stage = "boot"; Tries = 0; Sent = 0 }
     $ru = ( $script:Lang -eq "ru" )
     Set-Status ($(if ( $ru ) { "запускаю игру для карты " } else { "launching game for map " }) + $map + "...") "warn"
+    Start-Spin   # v5.17.38: запуск игры/карты - долгий процесс, точка статуса пульсирует
     $script:LaunchTimer.Start()
 }
 function Fail-Launch([string]$why) {
     $ru = ( $script:Lang -eq "ru" )
     $script:LaunchSeq = $null
     $script:LaunchTimer.Stop()
+    Stop-Spin   # v5.17.38
     Set-Status ($(if ( $ru ) { "не удалось запустить игру: " } else { "launch failed: " }) + $why) "err"
 }
 $script:LaunchTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -4175,9 +4177,13 @@ $script:LaunchTimer.Add_Tick({
                 if ( $script:CurrentMap -ieq $L.Map ) {
                     $script:LaunchSeq = $null
                     $script:LaunchTimer.Stop()
+                    Stop-Spin   # v5.17.38: карта загрузилась - пульс гасим
                     Set-Status ($(if ( $ru ) { "игра запущена на карте " } else { "game launched on map " }) + $L.Map)
                     return
                 }
+                # v5.17.38: Sync-FromLog внутри себя делает Stop-Spin - карта ещё
+                # НЕ загрузилась, пульс должен продолжаться до следующего тика
+                Start-Spin
                 $L.Tries++
                 if ( $L.Tries -ge 6 ) {
                     if ( $L.Sent -lt 5 ) { $L.Stage = "send" }
@@ -4982,6 +4988,21 @@ function Start-Spin {
             $script:SpinManual = $true
         }
     } catch { $script:SpinManual = $true }
+    # v5.17.38: пульс ОРАНЖЕВОЙ точки статуса на всё время долгой операции (typing
+    # [i/N], синк, загрузка карты). Юзер: "нужно понять, что ничего не зависло и
+    # просто грузится" - статусы выглядели мёртвым текстом. Точка - WPF UIElement,
+    # BeginAnimation на ней живой (не Freezable из XamlReader - ловушка v5.13 тут
+    # не стреляет). Анимация идёт на композиторе, UI-поток не занимает: печать
+    # команд не тормозит.
+    try {
+        $pulse = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $pulse.From = 1.0
+        $pulse.To = 0.25
+        $pulse.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(650))
+        $pulse.AutoReverse = $true
+        $pulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $controls['StatusDot'].BeginAnimation([System.Windows.UIElement]::OpacityProperty, $pulse)
+    } catch { }
 }
 function Stop-Spin {
     try {
@@ -4989,6 +5010,11 @@ function Stop-Spin {
             $script:SpinTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
             $script:SpinTransform.Angle = 0
         }
+    } catch { }
+    # v5.17.38: гасим пульс точки - операция закончилась
+    try {
+        $controls['StatusDot'].BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+        $controls['StatusDot'].Opacity = 1.0
     } catch { }
     $script:SpinManual = $false
 }
