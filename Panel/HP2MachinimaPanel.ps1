@@ -1004,6 +1004,8 @@ function Sync-FromLog([switch]$Force) {
         # шёл мимо промпта записи кадров и игра молча отвечала "need at least
         # 2 keys" (репорт: "запустил игру, в таблице данные, воспроизвести нельзя")
         $script:GameKeyCount = 0
+        # v5.17.41: новая сессия игры - QuietConsole надо выслать заново
+        $script:QuietSentState = -1
         $Force = $true
     }
     # защита от зависшего скана на ТОМ ЖЕ pid (процесс умер посреди чтения памяти)
@@ -2372,6 +2374,10 @@ function Send-PathSaveAndSync([string]$prefix) {
         <!-- v5.17.36: плавный старт/стоп пролёта (игровая команда PathSmoothStop) -->
         <CheckBox Name="CbPathSmooth" Content="Smooth stop" Foreground="{DynamicResource MutedBrush}"
                   Margin="0,0,0,6" HorizontalAlignment="Left" FontSize="12"/>
+        <!-- v5.17.41: терминал при пачках панельных команд - за экраном (тихая
+             парковка, дефолт) или видимый как обычно (игровая команда QuietConsole) -->
+        <CheckBox Name="CbConsoleQuiet" Content="Console off-screen" Foreground="{DynamicResource MutedBrush}"
+                  Margin="0,0,0,6" HorizontalAlignment="Left" FontSize="12"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
         <!-- v5.17.27: большая кнопка карты. MAP-метка видна ТОЛЬКО пока карта не
              загружена (тогда в карточке только метка справа сверху, кнопка серая);
@@ -2515,7 +2521,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear','CbConsoleQuiet')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -3111,6 +3117,20 @@ function Do-StopOrAbort {
     $st = Send-GameCommand "PathStop"
     Set-Playing $false
     Set-Status $st
+}
+# v5.17.41: догоняем игру значением QuietConsole, если оно расходится с последним
+# отправленным. Вызов - из полла (раз в 2.7с, ветка "игра на карте"): там SendBusy
+# уже false и CurrentMap определён, т.е. Confirm-GameActive не уйдёт в меню.
+# Смена pid игры сбрасывает QuietSentState (ini мог пережить, но подстрахуемся)
+function Apply-ConsoleQuiet {
+    if ( $script:QuietSentState -eq $script:ConsoleQuiet ) { return }
+    if ( $script:SendBusy -or $script:SyncBusy ) { return }
+    if ( $script:CurrentMap -eq "" ) { return }
+    try {
+        Send-GameCommand ("QuietConsole " + $(if ( $script:ConsoleQuiet ) { 1 } else { 0 })) | Out-Null
+        $script:QuietSentState = $script:ConsoleQuiet
+        Set-Status ("console: QuietConsole " + $(if ( $script:ConsoleQuiet ) { 1 } else { 0 }) + " applied")
+    } catch { }
 }
 function Do-PathPlay {
     # v5.17.30: кадры с другой карты - проигрывать нельзя (и F9 тоже)
@@ -5076,6 +5096,8 @@ $script:ObsPass = ""
 $script:ObsAutoRec = $false   # v5.17.31.4: REC с Play (галочка CbObsAuto)
 $script:GameKeyCount = -1     # v5.17.34: сколько кадров СЕЙЧАС у игры (из DUMPEND; -1 = дамп ещё не приходил)
 $script:PathSmooth = $true    # v5.17.36: плавный старт/стоп пролёта (галочка CbPathSmooth)
+$script:ConsoleQuiet = $true  # v5.17.41: терминал пачек за экраном (галочка CbConsoleQuiet, команда QuietConsole)
+$script:QuietSentState = -1   # v5.17.41: последнее отправленное в игру значение QuietConsole (-1 = ещё не отправляли)
 $script:BookOpen = $false     # v5.17.37.2: меню-книга открыта над уровнем (BOOK|1/0 от игры)
 $script:LastRejWarnSeq = 0    # v5.17.37.3: seq последнего REJECTED-предупреждения (анти-спам)
 $script:SmoothSentState = 1   # v5.17.37: последнее отправленное в игру состояние (дефолт игры = 1)
@@ -5145,6 +5167,7 @@ $script:UiTimer.Add_Tick({
             # Переезд буфера покрывается и иначе: быстрый скан, вернувший ПУСТО из
             # кэшированных областей, сам вызывает форс (ветка в Complete-SyncFromLog)
             $script:PollInGame = ($script:PollInGame + 1) % 40
+            Apply-ConsoleQuiet   # v5.17.41: догоняем QuietConsole, если юзер переключил галочку
             if ( $script:PollInGame -eq 0 ) { Sync-FromLog -Force } else { Sync-FromLog }
         }
     }
@@ -5244,6 +5267,8 @@ $script:LocData = @{
         ObsAutoTip = "Start OBS recording when playback starts, stop it when playback ends"
         Smooth = "Smooth stop"
         SmoothTip = "Smooth acceleration at the start of the flight and smooth deceleration to a stop at the final keyframe (game command PathSmoothStop)"
+        Quiet = "Console off-screen"
+        QuietTip = "Panel commands keep the game terminal parked off-screen (invisible). Uncheck to see the terminal open on screen during panel commands, as usual (game command QuietConsole)"
         TipObsRefresh = "Re-check the OBS connection now (the automatic check may lag while the panel is busy)"
         TipObsKey = "Set the OBS WebSocket password (same as in OBS: Tools -> WebSocket Server Settings)"
         TipObsNoPass = "OBS WebSocket needs a password: set it in OBS (Tools -> WebSocket Server Settings) and here via the key button"
@@ -5317,6 +5342,8 @@ $script:LocData = @{
         ObsAutoTip = "Запись OBS стартует вместе с воспроизведением и заканчивается при его окончании"
         Smooth = "Плавный стоп"
         SmoothTip = "Плавный разгон в начале пролёта и плавное торможение до нуля у финального кадра (игровая команда PathSmoothStop)"
+        Quiet = "Терминал вне экрана"
+        QuietTip = "Панельные команды держат терминал игры спаркованным за экраном (невидимым). Сними галочку, чтобы терминал открывался на экране во время команд панели, как обычно (игровая команда QuietConsole)"
         TipObsRefresh = "Перепроверить подключение OBS сейчас (автопроверка может отставать, пока панель занята)"
         TipObsKey = "Задать пароль OBS WebSocket (тот же, что в OBS: Сервис -> Настройки сервера WebSocket)"
         TipObsNoPass = "OBS WebSocket требует пароль: задай его в OBS (Сервис -> Настройки сервера WebSocket) и здесь кнопкой с ключом"
@@ -5374,6 +5401,8 @@ function Set-Lang([string]$lang) {
     $controls['CbObsAuto'].ToolTip = $L.ObsAutoTip
     $controls['CbPathSmooth'].Content = $L.Smooth
     $controls['CbPathSmooth'].ToolTip = $L.SmoothTip
+    $controls['CbConsoleQuiet'].Content = $L.Quiet
+    $controls['CbConsoleQuiet'].ToolTip = $L.QuietTip
     # v5.17.31.8: тултип кнопки ⟳ ручной перепроверки
     $controls['BtnObsRefresh'].ToolTip = $L.TipObsRefresh
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
@@ -5405,7 +5434,7 @@ $script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
 $script:FavMaps = New-Object System.Collections.Generic.List[string]
 function Save-Settings {
     try {
-        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec; smoothstop = $script:PathSmooth } |
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec; smoothstop = $script:PathSmooth; quietconsole = $script:ConsoleQuiet } |
             ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
 }
@@ -5430,6 +5459,7 @@ try {
     if ( $s.obsautorec -ne $null ) { $script:ObsAutoRec = ($s.obsautorec -eq $true) }
     # v5.17.36: галочка "Плавный стоп" (по умолчанию включена)
     if ( $s.smoothstop -ne $null ) { $script:PathSmooth = ($s.smoothstop -eq $true) }
+    if ( $s.quietconsole -ne $null ) { $script:ConsoleQuiet = ($s.quietconsole -eq $true) }
 } catch { }
 Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
@@ -5451,6 +5481,20 @@ try {
         $script:PathSmooth = ($controls['CbPathSmooth'].IsChecked -eq $true)
         Save-Settings
         Set-Status $(if ( $script:PathSmooth ) { "path: smooth start/stop ON" } else { "path: constant speed start/stop" })
+    })
+} catch { }
+
+# v5.17.41: чекбокс "Console off-screen" - тихая парковка терминала при пачках
+# панельных команд или видимый терминал "как обычно" (игровая команда
+# QuietConsole 1/0, exec в HPConsole + SaveConfig - выбор переживает рестарт игры)
+try {
+    $controls['CbConsoleQuiet'].IsChecked = $script:ConsoleQuiet
+    $controls['CbConsoleQuiet'].Add_Click({
+        $script:ConsoleQuiet = ($controls['CbConsoleQuiet'].IsChecked -eq $true)
+        Save-Settings
+        # команда уйдёт при ближайшем полле в игре (сейчас может идти пачка)
+        $script:QuietSentState = -1
+        Set-Status $(if ( $script:ConsoleQuiet ) { "console: off-screen parking during panel commands" } else { "console: visible during panel commands (as usual)" })
     })
 } catch { }
 
