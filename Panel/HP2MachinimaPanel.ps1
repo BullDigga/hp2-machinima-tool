@@ -499,6 +499,8 @@ function Focus-GameWindow([IntPtr]$h) {
 }
 
 $script:SendBusy = $false
+$script:SendAbort = $false    # v5.17.40: F10 во время печати пачки - прервать (см. Do-StopOrAbort)
+$script:SendBatchSize = 0     # v5.17.40: размер текущей пачки - F10 abort-ит только длинные (импорт)
 $script:SendDepth = 0     # v5.17.30.4: защита от втиснутых отправок поверх живой
 $script:SendFocusLost = $false  # v5.17.30.6: фокус ушёл посреди печати команды
 $script:ConfirmBypass = $false
@@ -683,7 +685,17 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen, [switch]$KeepOpen
         $ci = 0
         $res = ""
         $script:SendFocusLost = $false
+        $script:SendAbort = $false   # v5.17.40: прерывание пачки (флаг ставит Do-StopOrAbort)
+        $script:SendBatchSize = $cmds.Count   # v5.17.40: F10 abort-ит только пачки >2 команд
         foreach ($c in $cmds) {
+            # v5.17.40: юзер нажал F10 - прерываем пачку ПОСЛЕ текущей команды.
+            # Печать идёт на UI-потоке, но Dispatcher прокачивается в Wait-Pump,
+            # поэтому хоткей доезжает. Импорт на abort'е добивает очистку сам
+            # (см. BtnImport) - тут только остановка
+            if ( $script:SendAbort ) {
+                $res = "ABORTED at [$($ci+1)/$($cmds.Count)] - typing stopped by user"
+                break
+            }
             # v5.17.34: само-прерывание ЗАСТРЯВШЕЙ отправки = НЕТ ПРОГРЕССА, а не
             # "долго от старта пачки". Импорт 14 кадров = 113 команд и легально
             # печатается ~1.5 мин - старый 50с-лимит от старта убивал ЛЕГАЛЬНЫЕ
@@ -694,7 +706,7 @@ function Send-GameCommands([string[]]$cmds, [switch]$SkipOpen, [switch]$KeepOpen
                 break
             }
             $dots = "." * (1 + ($ci % 3))
-            Set-Status ("typing [$($ci+1)/$($cmds.Count)] $c $dots") "warn"
+            Set-Status ("typing [$($ci+1)/$($cmds.Count)] $c $dots (F10 = stop)") "warn"
             # v5.17.30.6: фокус потерян => ЧИСТЫЙ abort БЕЗ рефокуса (Alt-Tab юзера -
             # сознательное действие, выдёргивать фокус обратно нельзя; остаток пачки
             # не печатается, Type-Command сам остановился на первом символе не в игру)
@@ -2107,21 +2119,21 @@ function Send-PathSaveAndSync([string]$prefix) {
       <!-- v5.17.32: чипы хоткеев КЛИКАБЕЛЬНЫ (просьба юзера) - клик = то же действие,
            что и сама клавиша. Border + MouseLeftButtonDown: Button перехватил бы
            клик своим Chrome-стилем, а нам нужен родной вид чипа -->
-      <UniformGrid Grid.Column="1" Columns="5" VerticalAlignment="Center" Margin="0,0,10,0">
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipRefresh">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F5"/> <Run Name="TxHkRefresh" Foreground="{DynamicResource MutedBrush}" Text="  refresh"/></TextBlock>
+      <UniformGrid Grid.Column="1" Columns="5" VerticalAlignment="Center" Margin="0,0,8,0">
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="1,0" Padding="5,4" Cursor="Hand" Name="HkChipRefresh">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="11"><Run FontWeight="Bold" Text="F5"/> <Run Name="TxHkRefresh" Foreground="{DynamicResource MutedBrush}" Text="  refresh"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipFrame">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F8"/> <Run Name="TxHkFrame" Foreground="{DynamicResource MutedBrush}" Text="  frame"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="1,0" Padding="5,4" Cursor="Hand" Name="HkChipFrame">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="11"><Run FontWeight="Bold" Text="F8"/> <Run Name="TxHkFrame" Foreground="{DynamicResource MutedBrush}" Text="  frame"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipPlay">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F9"/> <Run Name="TxHkPlay" Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="1,0" Padding="5,4" Cursor="Hand" Name="HkChipPlay">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="11"><Run FontWeight="Bold" Text="F9"/> <Run Name="TxHkPlay" Foreground="{DynamicResource MutedBrush}" Text="  play"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipStop">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F10"/> <Run Name="TxHkStop" Foreground="{DynamicResource MutedBrush}" Text="  stop"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="1,0" Padding="5,4" Cursor="Hand" Name="HkChipStop">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="11"><Run FontWeight="Bold" Text="F10"/> <Run Name="TxHkStop" Foreground="{DynamicResource MutedBrush}" Text="  stop"/></TextBlock>
         </Border>
-        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="2,0" Padding="8,4" Cursor="Hand" Name="HkChipClear">
-          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="12"><Run FontWeight="Bold" Text="F11"/> <Run Name="TxHkClear" Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
+        <Border CornerRadius="6" Background="{DynamicResource PanelBrush}" Margin="1,0" Padding="5,4" Cursor="Hand" Name="HkChipClear">
+          <TextBlock Foreground="{DynamicResource TextBrush}" FontSize="11"><Run FontWeight="Bold" Text="F11"/> <Run Name="TxHkClear" Foreground="{DynamicResource MutedBrush}" Text="  clear"/></TextBlock>
         </Border>
       </UniformGrid>
       <Button Name="BtnLang" Grid.Column="2" Width="34" Height="30" Margin="0,0,12,0" BorderThickness="0"
@@ -2503,7 +2515,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -3081,6 +3093,25 @@ function Get-PathTotalDur {
     foreach ( $r in $script:KeyRows ) { if ( $r.Hold -gt 0 ) { $tot += $r.Hold } }
     return $tot
 }
+# ---------- v5.17.40: F10 = stop playback, а во время печати пачки - ABORT ----------
+# Одновременно кино и печать пачки не идут, поэтому одна клавиша честно обслуживает
+# оба состояния: печать идёт -> прервать её ( AbortRequest); печати нет -> PathStop.
+# Abort только для пачек > 2 команд: пачка из 1-2 команд (сам PathStop, PathGoto,
+# packed-правка) - abort убил бы ЕЁ, и повторный F10 "останавливал" бы сам себя
+function Do-StopOrAbort {
+    if ( $script:SendBusy ) {
+        if ( $script:SendBatchSize -gt 2 ) {
+            $script:SendAbort = $true
+            Set-Status "abort requested - stopping the typing after the current command..." "warn"
+        } else {
+            Set-Status "busy: a short command is still sending - press F10 again in a moment" "warn"
+        }
+        return
+    }
+    $st = Send-GameCommand "PathStop"
+    Set-Playing $false
+    Set-Status $st
+}
 function Do-PathPlay {
     # v5.17.30: кадры с другой карты - проигрывать нельзя (и F9 тоже)
     if ( Test-WrongMap ) { Set-Status ($script:LocData[$script:Lang].TipWrongMap); return }
@@ -3626,6 +3657,20 @@ $controls['BtnImport'].Add_Click({
         if ( $n -eq 0 ) { Set-Status "no valid keyframe lines in file"; return }
         $script:StampNextSync = $true
         $st = Send-GameCommands $cmds
+        # v5.17.40: прерывание импорта (F10). К моменту abort'а игра УЖЕ исполнила
+        # PathClear + часть кадров - старый путь в игре всё равно уничтожен.
+        # Приводим оба конца к честному пустому состоянию (как корзина):
+        # PathClear добивает частичные кадры в игре, UserClearPending не даёт
+        # правилу "путь пуст -> восстановить кадры" вернуть старую таблицу
+        if ( $st.Contains("typing stopped by user") ) {
+            $script:UserClearPending = $true
+            $script:PendingImportTimes = $null
+            $st2 = Send-GameCommand "PathClear"
+            # синк с пустым путём очистит таблицу и бэкап (тот же путь, что корзина)
+            $script:UserClearPending = $true
+            Sync-AfterCommand "import ABORTED (F10) - path and table cleared | $st2"
+            return
+        }
         Sync-AfterCommand "imported $n keys from $([System.IO.Path]::GetFileName($dlg.FileName)) | $st"
     }
 })
@@ -4625,7 +4670,10 @@ $window.Add_Loaded({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
     $hwnd = $helper.Handle
     $src = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
-    # id: 1=PathAdd(F8) 2=PathPlay(F9) 3=PathStop(F10) 4=SaveIni(F11) 5=ShowPanel(Ctrl+Alt+H) 6=Refresh(F5, #21)
+    # id: 1=PathAdd(F8) 2=PathPlay(F9) 3=PathStop/Abort(F10) 4=SaveIni(F11) 5=ShowPanel(Ctrl+Alt+H) 6=Refresh(F5, #21)
+    # v5.17.40: abort печати пачки живёт НА F10 (см. Do-StopOrAbort) - отдельная
+    # клавиша не нужна. F12 занята системно (RegisterHotKey не выделяется), F6
+    # юзер отклонил - "убери F6, оставь F10 с этими функциями"
     [GameCtl]::RegisterHotKey($hwnd, 1, 0, 0x77) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 2, 0, 0x78) | Out-Null
     [GameCtl]::RegisterHotKey($hwnd, 3, 0, 0x79) | Out-Null
@@ -4640,7 +4688,7 @@ $window.Add_Loaded({
             switch ($id) {
                 1 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathAdd }) | Out-Null }
                 2 { $window.Dispatcher.BeginInvoke([Action]{ Do-PathPlay }) | Out-Null }
-                3 { $window.Dispatcher.BeginInvoke([Action]{ $st = Send-GameCommand "PathStop"; Set-Playing $false; Set-Status $st }) | Out-Null }
+                3 { $window.Dispatcher.BeginInvoke([Action]{ Do-StopOrAbort }) | Out-Null }   # v5.17.40: F10 = stop ИЛИ abort печати
                 6 {
                     # F5 (#21): обновить таблицу кадров + перепроверить OBS + состояние игры
                     $window.Dispatcher.BeginInvoke([Action]{ Do-FullRefresh }) | Out-Null
@@ -4696,14 +4744,14 @@ $window.Add_Loaded({
         }
         return [IntPtr]::Zero
     })
-    Set-Status "hotkeys: F5 refresh / F8 add / F9 play / F10 stop / F11 clear / Ctrl+Alt+H panel"
+    Set-Status "hotkeys: F5 refresh / F8 add / F9 play / F10 stop or abort send / F11 clear / Ctrl+Alt+H panel"
     # v5.17.32: клик по чипу хоткея = то же действие, что и клавиша (запрос юзера).
     # Один и тот же код, что в WM_HOTKEY-ветках выше
     try {
         $controls['HkChipRefresh'].Add_MouseLeftButtonDown({ param($s, $e) Do-FullRefresh })
         $controls['HkChipFrame'].Add_MouseLeftButtonDown({ param($s, $e) Do-PathAdd })
         $controls['HkChipPlay'].Add_MouseLeftButtonDown({ param($s, $e) Do-PathPlay })
-        $controls['HkChipStop'].Add_MouseLeftButtonDown({ param($s, $e) $st = Send-GameCommand "PathStop"; Set-Playing $false; Set-Status $st })
+        $controls['HkChipStop'].Add_MouseLeftButtonDown({ param($s, $e) Do-StopOrAbort })
         $controls['HkChipClear'].Add_MouseLeftButtonDown({
             param($s, $e)
             $script:UserClearPending = $true
@@ -4716,7 +4764,7 @@ $window.Add_Loaded({
 
 $window.Add_Closing({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper $window
-    for ( $id = 1; $id -le 5; $id++ ) { [GameCtl]::UnregisterHotKey($helper.Handle, $id) | Out-Null }
+    for ( $id = 1; $id -le 6; $id++ ) { [GameCtl]::UnregisterHotKey($helper.Handle, $id) | Out-Null }
 })
 
 # ---------- theme toggle (dark default) ----------
