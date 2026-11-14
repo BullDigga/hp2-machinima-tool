@@ -120,6 +120,18 @@ public static class GameCtl {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint SendInput(uint n, INPUT[] p, int size);
 
+    public static void Hold(ushort vk, int ms) {
+        // v5.17.42 (#14): press-hold-release for the exact-move buttons - one step
+        // of the freecam needs the key HELD for ~120ms, an instant Tap moves a
+        // single tick (~10 units at speed 600 - imperceptible)
+        INPUT[] inp = new INPUT[1];
+        inp[0].type = INPUT_KEYBOARD; inp[0].u.ki.wVk = vk;
+        SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+        System.Threading.Thread.Sleep(ms);
+        inp[0].u.ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+    }
+
     public static void Tap(ushort vk) {
         INPUT[] inp = new INPUT[2];
         inp[0].type = INPUT_KEYBOARD; inp[0].u.ki.wVk = vk;
@@ -1006,6 +1018,8 @@ function Sync-FromLog([switch]$Force) {
         $script:GameKeyCount = 0
         # v5.17.41: новая сессия игры - QuietConsole надо выслать заново
         $script:QuietSentState = -1
+        # v5.17.42: и бинды точных осей
+        $script:ExactSentState = ""
         $Force = $true
     }
     # защита от зависшего скана на ТОМ ЖЕ pid (процесс умер посреди чтения памяти)
@@ -2378,6 +2392,10 @@ function Send-PathSaveAndSync([string]$prefix) {
              парковка, дефолт) или видимый как обычно (игровая команда QuietConsole) -->
         <CheckBox Name="CbConsoleQuiet" Content="Console off-screen" Foreground="{DynamicResource MutedBrush}"
                   Margin="0,0,0,6" HorizontalAlignment="Left" FontSize="12"/>
+        <!-- v5.17.42 (#14): модалка управления - клавиатура + точные оси T/G/F/H -->
+        <Button Name="BtnControls" Height="30" Margin="0,0,0,6" HorizontalAlignment="Stretch"
+                Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource MutedBrush}"
+                Cursor="Hand" FontSize="12"/>
         <Button Name="BtnPathStop" Content="■  Stop" Height="34" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}" ToolTipService.ShowOnDisabled="True"/>
         <!-- v5.17.27: большая кнопка карты. MAP-метка видна ТОЛЬКО пока карта не
              загружена (тогда в карточке только метка справа сверху, кнопка серая);
@@ -2521,7 +2539,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear','CbConsoleQuiet')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear','CbConsoleQuiet','BtnControls')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -2644,6 +2662,7 @@ $controls['BtnObsKey'].Add_Click({
         $m.AllowsTransparency = $true
         $m.ResizeMode = "NoResize"
         $m.Topmost = $true
+    $m.Owner = $window   # v5.17.42: owner keeps the modal ABOVE the Topmost panel
         $m.Background = [Windows.Media.Brushes]::Transparent
 
         $panel2 = $window.Resources['TableBgBrush']
@@ -3141,6 +3160,23 @@ function Apply-ConsoleQuiet {
         } else {
             Set-Status "console: off-screen parking ON"
         }
+    } catch { }
+}
+# v5.17.42 (#14): пересылаем в игру переназначенные клавиши точных осей - бинды
+# живут в VAR'ах игры (не ini), каждая новая сессия игры получает их заново.
+# Шлём только отличные от дефолта (T/G/F/H дефолт уже в defaultproperties)
+function Apply-ExactKeys {
+    if ( $script:ExactSentState -eq "done" ) { return }
+    if ( $script:SendBusy -or $script:SyncBusy ) { return }
+    if ( $script:CurrentMap -eq "" ) { return }
+    try {
+        $nondef = @{ up = 71; down = 84; left = 70; right = 72 }
+        foreach ( $k in @('up','down','left','right') ) {
+            if ( $script:ExactBinds[$k] -ne $nondef[$k] ) {
+                Send-GameCommand ("CamBind" + $(switch ($k) { 'up' {'Up'} 'down' {'Down'} 'left' {'Left'} 'right' {'Right'} }) + " " + $script:ExactBinds[$k]) | Out-Null
+            }
+        }
+        $script:ExactSentState = "done"
     } catch { }
 }
 function Do-PathPlay {
@@ -4798,6 +4834,266 @@ $window.Add_Closing({
     for ( $id = 1; $id -le 6; $id++ ) { [GameCtl]::UnregisterHotKey($helper.Handle, $id) | Out-Null }
 })
 
+# ---------- v5.17.42 (#14): модалка управления - клавиатура + точные оси ----------
+function Show-ControlsModal {
+    $m = New-Object System.Windows.Window
+    $m.Title = "HP2 - Controls"
+    $m.Width = 1080; $m.Height = 660
+    $m.WindowStyle = 'None'; $m.ResizeMode = 'NoResize'
+    $m.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString("#FF1E1E2E")
+    $m.Left = $window.Left + 60; $m.Top = $window.Top + 40
+    # v5.17.42: modal MUST be topmost - the main panel is Topmost and covers
+    # the keyboard column otherwise (only the right edge was visible)
+    $m.Topmost = $true
+    $m.Owner = $window   # v5.17.42: owner keeps the modal ABOVE the Topmost panel
+
+    $root = New-Object System.Windows.Controls.Grid
+    $c0 = New-Object System.Windows.Controls.ColumnDefinition; $c0.Width = [System.Windows.GridLength]::Auto
+    $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    [void]$root.ColumnDefinitions.Add($c0); [void]$root.ColumnDefinitions.Add($c1)
+
+    # --- header (draggable) ---
+    $hdr = New-Object System.Windows.Controls.TextBlock
+    $hdr.Text = $(if ( $script:Lang -eq 'ru' ) { "  Управление" } else { "  Controls" })
+    $hdr.FontSize = 20; $hdr.FontWeight = 'Bold'
+    $hdr.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString("#FFCDD6F4")
+    $hdr.Margin = [System.Windows.Thickness]::new(16, 10, 0, 6)
+    $close = New-Object System.Windows.Controls.Button
+    $close.Content = "X"; $close.Width = 34; $close.Height = 30
+    $close.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString("#FFE5484D")
+    $close.Foreground = [System.Windows.Media.Brushes]::White
+    $close.BorderThickness = [System.Windows.Thickness]::new(0)
+    $close.HorizontalAlignment = 'Right'; $close.VerticalAlignment = 'Top'
+    $close.Margin = [System.Windows.Thickness]::new(0, 8, 10, 0)
+    $close.Add_Click({ $script:ExactModal.Close() })
+    $hdrGrid = New-Object System.Windows.Controls.Grid
+    [void]$hdrGrid.Children.Add($hdr); [void]$hdrGrid.Children.Add($close)
+    $hdr.Add_MouseLeftButtonDown({ try { $script:ExactModal.DragMove() } catch { } })
+
+    # --- keyboard: colored keycaps ---
+    $kb = New-Object System.Windows.Controls.StackPanel
+    $kb.Margin = [System.Windows.Thickness]::new(16, 46, 8, 0)   # below the header row
+    $kb.VerticalAlignment = 'Top'
+    # v5.17.42: ЦВЕТА в script-scope - обработчики кликов (динамический скоуп
+    # PowerShell) не видят локалы функции в момент вызова, ловушка v5.17.30.9h
+    $script:ExactNeutral  = "#FF313244"; $script:ExactNeuText = "#FFA6ADC8"
+    $script:ExactGreen    = "#FF2F9E44"; $script:ExactBlue   = "#FF1971C2"
+    $script:ExactOrange   = "#FFE8590C"; $script:ExactPurple = "#FF7048E8"
+    $script:ExactModal    = $m
+    $script:ExactKeyCaps = @{}   # vk -> Border (перекрашивается при ребинде)
+    $wasd = @( 'W', 'A', 'S', 'D' )
+    $rows = @(
+        @('Esc', '`', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='),
+        @('', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '[', ']'),
+        @('', 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ';', '''', '\'),
+        @('', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', ',', '.', '/', '', '', '')
+    )
+    foreach ( $row in $rows ) {
+        $g = New-Object System.Windows.Controls.Grid
+        $g.Height = 48; $g.Margin = [System.Windows.Thickness]::new(0, 2, 0, 0)
+        for ( $i = 0; $i -lt 16; $i++ ) { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = [System.Windows.GridLength]::new(48); [void]$g.ColumnDefinitions.Add($cd) }
+        $col = 0
+        foreach ( $keyLabel in $row ) {
+            if ( $keyLabel -ne '' ) {
+                $b = New-Object System.Windows.Controls.Border
+                $b.CornerRadius = [System.Windows.CornerRadius]::new(6)
+                $b.Width = 44; $b.Height = 44
+                $b.Margin = [System.Windows.Thickness]::new(2, 2, 2, 2)
+                $tb = New-Object System.Windows.Controls.TextBlock
+                $tb.Text = $keyLabel; $tb.HorizontalAlignment = 'Center'; $tb.VerticalAlignment = 'Center'; $tb.FontSize = 13
+                if ( $wasd -contains $keyLabel ) {
+                    $b.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactGreen)
+                    $tb.Foreground = [System.Windows.Media.Brushes]::White
+                } else {
+                    $b.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactNeutral)
+                    $tb.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactNeuText)
+                }
+                $b.Child = $tb
+                if ( $keyLabel.Length -eq 1 ) { $vkCap = [int][char]$keyLabel; if ( $vkCap -ge 65 -and $vkCap -le 90 ) { $script:ExactKeyCaps[$vkCap] = $b } }
+                if ( $keyLabel -eq '`' ) {
+                    $b.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactPurple)
+                    $tb.Foreground = [System.Windows.Media.Brushes]::White
+                }
+                [void]$g.Children.Add($b)
+                [System.Windows.Controls.Grid]::SetColumn($b, $col)
+            }
+            $col++
+        }
+        [void]$kb.Children.Add($g)
+    }
+    # строка стрелок + numpad
+    $g2 = New-Object System.Windows.Controls.Grid
+    $g2.Height = 110; $g2.Margin = [System.Windows.Thickness]::new(0, 4, 0, 0)
+    for ( $i = 0; $i -lt 16; $i++ ) { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = [System.Windows.GridLength]::new(48); [void]$g2.ColumnDefinitions.Add($cd) }
+    $arrowKeys = @( @(13, 0, '▲'), @(12, 1, '◀'), @(13, 1, '▼'), @(14, 1, '▶'), @(15, 0, 'N8'), @(15, 1, 'N4'), @(16, 0, 'N6'), @(16, 1, 'N2') )
+    foreach ( $ak in $arrowKeys ) {
+        $b = New-Object System.Windows.Controls.Border
+        $b.CornerRadius = [System.Windows.CornerRadius]::new(6)
+        $b.Width = 44; $b.Height = 44; $b.Margin = [System.Windows.Thickness]::new(2)
+        $b.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactBlue)
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $ak[2]; $tb.HorizontalAlignment = 'Center'; $tb.VerticalAlignment = 'Center'; $tb.FontSize = 13
+        $tb.Foreground = [System.Windows.Media.Brushes]::White
+        $b.Child = $tb
+        [void]$g2.Children.Add($b)
+        [System.Windows.Controls.Grid]::SetColumn($b, $ak[0])
+        [System.Windows.Controls.Grid]::SetRow($b, $ak[1])
+    }
+    $rd = New-Object System.Windows.Controls.RowDefinition; $rd.Height = [System.Windows.GridLength]::new(52)
+    $rd2 = New-Object System.Windows.Controls.RowDefinition; $rd2.Height = [System.Windows.GridLength]::new(52)
+    [void]$g2.RowDefinitions.Add($rd); [void]$g2.RowDefinitions.Add($rd2)
+    [void]$kb.Children.Add($g2)
+
+    # --- легенда ---
+    $legend = New-Object System.Windows.Controls.StackPanel
+    $legend.Margin = [System.Windows.Thickness]::new(16, 10, 8, 0)
+    function Add-LegendItem([string]$color, [string]$text) {
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $sp.Orientation = 'Horizontal'; $sp.Margin = [System.Windows.Thickness]::new(0, 3, 0, 3)
+        $sw = New-Object System.Windows.Controls.Border
+        $sw.Width = 14; $sw.Height = 14; $sw.CornerRadius = [System.Windows.CornerRadius]::new(4)
+        $sw.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($color)
+        $sw.VerticalAlignment = 'Center'; $sw.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $text; $tb.FontSize = 12; $tb.TextWrapping = 'Wrap'
+        $tb.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString("#FFCDD6F4")
+        $tb.MaxWidth = 420
+        [void]$sp.Children.Add($sw); [void]$sp.Children.Add($tb)
+        [void]$script:ModalLegend.Children.Add($sp)
+    }
+
+    # --- правая колонка: кнопки осей + ребайнд ---
+    $right = New-Object System.Windows.Controls.StackPanel
+    $right.Margin = [System.Windows.Thickness]::new(12, 0, 16, 0)
+    $right.VerticalAlignment = 'Top'
+    $script:ExactDirButtons = @{}   # dir -> Button (обновляются при ребинде)
+    $script:ExactArmBtn = $null
+    $script:ExactArmDir = ""
+
+    function Make-DirRow([string]$dir, [string]$title) {
+        $vk = $script:ExactBinds[$dir]
+        $name = if ( $script:ExactVKNames.ContainsKey($vk) ) { $script:ExactVKNames[$vk] } else { "0x{0:X2}" -f $vk }
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $sp.Orientation = 'Horizontal'; $sp.Margin = [System.Windows.Thickness]::new(0, 4, 0, 4)
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Height = 34; $btn.Width = 170; $btn.Content = ($title + "  [" + $name + "]")
+        $btn.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactOrange)
+        $btn.Foreground = [System.Windows.Media.Brushes]::White
+        $btn.BorderThickness = [System.Windows.Thickness]::new(0)
+        $btn.Cursor = [System.Windows.Input.Cursors]::Hand
+        $btn.Tag = $dir
+        $btn.Add_Click({
+            # клик = один шаг: фокус в игру, удержание клавиши 140 мс, фокус обратно
+            param($s, $e)
+            $d = [string]$s.Tag
+            $vk2 = [int]$script:ExactBinds[$d]
+            $gp = Get-Process Game -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ( $gp -eq $null ) { return }
+            $gh = $gp.MainWindowHandle
+            [void][GameCtl]::SetForegroundWindow($gh)
+            Start-Sleep -Milliseconds 120
+            [GameCtl]::Hold([uint16]$vk2, 140)
+            try { $script:ExactModal.Activate() } catch { }
+        })
+        $rb = New-Object System.Windows.Controls.Button
+        $rb.Height = 34; $rb.Width = 92; $rb.Margin = [System.Windows.Thickness]::new(8, 0, 0, 0)
+        $rb.Content = $(if ( $script:Lang -eq 'ru' ) { "изменить" } else { "rebind" })
+        $rb.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactNeutral)
+        $rb.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactNeuText)
+        $rb.BorderThickness = [System.Windows.Thickness]::new(0)
+        $rb.Cursor = [System.Windows.Input.Cursors]::Hand
+        $rb.Tag = $dir
+        $rb.Add_Click({
+            param($s, $e)
+            $d = [string]$s.Tag
+            if ( $script:ExactArmDir -eq $d ) { return }
+            $script:ExactArmDir = $d
+            $s.Content = $(if ( $script:Lang -eq 'ru' ) { "нажми..." } else { "press..." })
+            $s.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactPurple)
+        })
+        [void]$sp.Children.Add($btn); [void]$sp.Children.Add($rb)
+        [void]$right.Children.Add($sp)
+        $script:ExactDirButtons[$dir] = @{ Btn = $btn; Rb = $rb }
+    }
+    $isRu = ( $script:Lang -eq 'ru' )
+    Make-DirRow 'down'  $(if ( $isRu ) { "▼ ниже" } else { "▼ down" })
+    Make-DirRow 'up'    $(if ( $isRu ) { "▲ выше" } else { "▲ up" })
+    Make-DirRow 'left'  $(if ( $isRu ) { "◀ поворот влево" } else { "◀ turn left" })
+    Make-DirRow 'right' $(if ( $isRu ) { "▶ поворот вправо" } else { "▶ turn right" })
+
+    $hint = New-Object System.Windows.Controls.TextBlock
+    $hint.Text = $(if ( $isRu ) {
+        "Клик по кнопке = один шаг камеры (~0.14 c удержания клавиши).`nИзменить - нажми, затем нажми новую клавишу (в этом окне).`nБинды улетают в игру и восстанавливаются в новой сессии автоматически."
+    } else {
+        "Click = one camera step (~0.14s key hold).`nRebind - click, then press the new key (in this window).`nBinds are sent to the game and restored on each new session automatically."
+    })
+    $hint.FontSize = 11; $hint.TextWrapping = 'Wrap'
+    $hint.Foreground = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactNeuText)
+    $hint.Margin = [System.Windows.Thickness]::new(0, 10, 0, 0)
+    [void]$right.Children.Add($hint)
+
+    # --- рендер раскраски клавиш под текущие бинды ---
+    function Paint-ExactCaps {
+        foreach ( $d in @('up','down','left','right') ) {
+            $vk = [int]$script:ExactBinds[$d]
+            $entry = $script:ExactKeyCaps[$vk]
+            if ( $entry -ne $null ) {
+                $entry.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactOrange)
+            }
+        }
+    }
+
+    # --- сборка ---
+    $left = New-Object System.Windows.Controls.StackPanel
+    $script:ModalLegend = $legend
+    [void]$left.Children.Add($kb)
+    [void]$left.Children.Add($legend)
+    Add-LegendItem $script:ExactGreen  $(if ( $isRu ) { "WASD - управление Гарри" } else { "WASD - Harry control" })
+    Add-LegendItem $script:ExactBlue   $(if ( $isRu ) { "Стрелки + Numpad - камера (ПО НАКЛОННЫМ осям, плывёт высота при наклоне)" } else { "Arrows + Numpad - camera (TILTED axes, height drifts when pitched)" })
+    Add-LegendItem $script:ExactOrange $(if ( $isRu ) { "T/G - строго вниз/вверх; F/H - ПОВОРОТ камеры на месте влево/вправо (переназначается)" } else { "T/G - strict vertical down/up; F/H - TURN camera in place left/right (remappable)" })
+    Add-LegendItem $script:ExactPurple $(if ( $isRu ) { "` - терминал; Shift+` - парковка панелью" } else { "` - terminal; Shift+` - panel parking" })
+    Add-LegendItem $script:ExactNeutral $(if ( $isRu ) { "Мышь - поворот камеры, Пробел - ускорение, Esc - меню" } else { "Mouse - camera turn, Space - boost, Esc - menu" })
+    Paint-ExactCaps
+    [void]$root.Children.Add($left);  [System.Windows.Controls.Grid]::SetColumn($left, 0)
+    [void]$root.Children.Add($right); [System.Windows.Controls.Grid]::SetColumn($right, 1)
+    [void]$root.Children.Add($hdrGrid)
+
+    # захват клавиши для ребинда
+    $m.Add_PreviewKeyDown({
+        param($s, $e)
+        if ( $script:ExactArmDir -ne "" ) {
+            $e.Handled = $true
+            try {
+                $vk = [System.Windows.Input.KeyInterop]::VirtualKeyFromKey($e.Key)
+                if ( $vk -ge 1 ) {
+                    $cmdName = switch ( $script:ExactArmDir ) { 'up' { 'CamBindUp' } 'down' { 'CamBindDown' } 'left' { 'CamBindLeft' } 'right' { 'CamBindRight' } }
+                    Set-Status ("sending " + $cmdName + " " + $vk + "...")
+                    Send-GameCommand ($cmdName + " " + $vk) | Out-Null
+                    $script:ExactBinds[$script:ExactArmDir] = $vk
+                    Save-Settings
+                    # обновить кнопку + подпись клавиши
+                    $name2 = if ( $script:ExactVKNames.ContainsKey($vk) ) { $script:ExactVKNames[$vk] } else { "0x{0:X2}" -f $vk }
+                    $pair = $script:ExactDirButtons[$script:ExactArmDir]
+                    $pair.Btn.Content = ($pair.Btn.Content -replace '\[.*\]', ("[" + $name2 + "]"))
+                    Paint-ExactCaps
+                    Set-Status ("exact bind " + $script:ExactArmDir + " -> " + $name2 + " applied")
+                }
+            } catch { }
+            $pair = $script:ExactDirButtons[$script:ExactArmDir]
+            $pair.Rb.Content = $(if ( $script:Lang -eq 'ru' ) { "изменить" } else { "rebind" })
+            $pair.Rb.Background = [System.Windows.Media.SolidColorBrush][System.Windows.Media.ColorConverter]::ConvertFromString($script:ExactNeutral)
+            $script:ExactArmDir = ""
+        }
+    })
+
+    $m.Content = $root
+    [void]$m.ShowDialog()
+}
+$controls['BtnControls'].Add_Click({
+    param($s, $e)
+    try { Show-ControlsModal } catch { Set-Status ("controls modal error: " + $_.Exception.Message) }
+})
+
 # ---------- theme toggle (dark default) ----------
 $script:DarkTheme = $true
 $script:DarkBrushes = @{ BgBrush = "#F21E1E2E"; PanelBrush = "#FF313244"; TableBgBrush = "#FF181825"; AltRowBrush = "#FF313244"; TextBrush = "#FFCDD6F4"; MutedBrush = "#FFA6ADC8"; LineBrush = "#FF585B70"; StatusBrush = "#FF94E2D5"; StatusWarnBrush = "#FFFAB387"; DotBrush = "#FFA6E3A1"; SyncBrush = "#FF1F3D2E"; DirtyBrush = "#FF3A3F4D"; NavBrush = "#FF89DCEB"; HdrBrush = "#FF313244"; SelBrush = "#FF3D4A66" }
@@ -5109,6 +5405,11 @@ $script:GameKeyCount = -1     # v5.17.34: сколько кадров СЕЙЧА
 $script:PathSmooth = $true    # v5.17.36: плавный старт/стоп пролёта (галочка CbPathSmooth)
 $script:ConsoleQuiet = $true  # v5.17.41: терминал пачек за экраном (галочка CbConsoleQuiet, команда QuietConsole)
 $script:QuietSentState = -1   # v5.17.41: последнее отправленное в игру значение QuietConsole (-1 = ещё не отправляли)
+# v5.17.42 (#14): точные оси камеры - T вниз, G вверх, F влево, H вправо (VK-коды,
+# переназначаются в модалке управления, панели пересылает их в игру при старте сессии)
+$script:ExactBinds = @{ up = 84; down = 71; left = 70; right = 72 }   # T G F H (v5.17.42.1: T=up, G=down - user test)
+$script:ExactSentState = ""   # "" = ещё не отправляли в эту сессию игры
+$script:ExactVKNames = @{ 71 = 'G'; 84 = 'T'; 70 = 'F'; 72 = 'H'; 37 = '◀'; 38 = '▲'; 39 = '▶'; 40 = '▼'; 32 = 'Space'; 9 = 'Tab'; 46 = 'Del'; 35 = 'End'; 36 = 'Home'; 45 = 'Ins'; 20 = 'Caps'; 17 = 'Ctrl'; 16 = 'Shift'; 18 = 'Alt' }
 $script:BookOpen = $false     # v5.17.37.2: меню-книга открыта над уровнем (BOOK|1/0 от игры)
 $script:LastRejWarnSeq = 0    # v5.17.37.3: seq последнего REJECTED-предупреждения (анти-спам)
 $script:SmoothSentState = 1   # v5.17.37: последнее отправленное в игру состояние (дефолт игры = 1)
@@ -5179,6 +5480,7 @@ $script:UiTimer.Add_Tick({
             # кэшированных областей, сам вызывает форс (ветка в Complete-SyncFromLog)
             $script:PollInGame = ($script:PollInGame + 1) % 40
             Apply-ConsoleQuiet   # v5.17.41: догоняем QuietConsole, если юзер переключил галочку
+            Apply-ExactKeys      # v5.17.42: догоняем бинды точных осей в новой сессии игры
             if ( $script:PollInGame -eq 0 ) { Sync-FromLog -Force } else { Sync-FromLog }
         }
     }
@@ -5280,6 +5582,8 @@ $script:LocData = @{
         SmoothTip = "Smooth acceleration at the start of the flight and smooth deceleration to a stop at the final keyframe (game command PathSmoothStop)"
         Quiet = "Console off-screen"
         QuietTip = "Panel commands keep the game terminal parked off-screen (invisible). Uncheck to see the terminal open on screen during panel commands, as usual (game command QuietConsole)"
+        Controls = "⌨  Controls"
+        ControlsTip = "All game controls: keyboard map, exact-axis moves T/G/F/H with rebind"
         TipObsRefresh = "Re-check the OBS connection now (the automatic check may lag while the panel is busy)"
         TipObsKey = "Set the OBS WebSocket password (same as in OBS: Tools -> WebSocket Server Settings)"
         TipObsNoPass = "OBS WebSocket needs a password: set it in OBS (Tools -> WebSocket Server Settings) and here via the key button"
@@ -5355,6 +5659,8 @@ $script:LocData = @{
         SmoothTip = "Плавный разгон в начале пролёта и плавное торможение до нуля у финального кадра (игровая команда PathSmoothStop)"
         Quiet = "Терминал вне экрана"
         QuietTip = "Панельные команды держат терминал игры спаркованным за экраном (невидимым). Сними галочку, чтобы терминал открывался на экране во время команд панели, как обычно (игровая команда QuietConsole)"
+        Controls = "⌨  Управление"
+        ControlsTip = "Всё управление игрой: раскладка клавиатуры, точные оси T/G/F/H с переназначением"
         TipObsRefresh = "Перепроверить подключение OBS сейчас (автопроверка может отставать, пока панель занята)"
         TipObsKey = "Задать пароль OBS WebSocket (тот же, что в OBS: Сервис -> Настройки сервера WebSocket)"
         TipObsNoPass = "OBS WebSocket требует пароль: задай его в OBS (Сервис -> Настройки сервера WebSocket) и здесь кнопкой с ключом"
@@ -5414,6 +5720,8 @@ function Set-Lang([string]$lang) {
     $controls['CbPathSmooth'].ToolTip = $L.SmoothTip
     $controls['CbConsoleQuiet'].Content = $L.Quiet
     $controls['CbConsoleQuiet'].ToolTip = $L.QuietTip
+    $controls['BtnControls'].Content = $L.Controls
+    $controls['BtnControls'].ToolTip = $L.ControlsTip
     # v5.17.31.8: тултип кнопки ⟳ ручной перепроверки
     $controls['BtnObsRefresh'].ToolTip = $L.TipObsRefresh
     $controls['FlagEN'].Visibility = if ( $lang -eq "en" ) { "Visible" } else { "Collapsed" }
@@ -5445,7 +5753,7 @@ $script:SettingsFile = Join-Path $PSScriptRoot "settings.json"
 $script:FavMaps = New-Object System.Collections.Generic.List[string]
 function Save-Settings {
     try {
-        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec; smoothstop = $script:PathSmooth; quietconsole = $script:ConsoleQuiet } |
+        @{ theme = $(if ( $script:DarkTheme ) { "dark" } else { "light" }); lang = $script:Lang; favmaps = @($script:FavMaps); mapsdir = $script:MapsDir; obsport = $script:ObsPort; obspass = $script:ObsPass; obsautorec = $script:ObsAutoRec; smoothstop = $script:PathSmooth; quietconsole = $script:ConsoleQuiet; exactkeys = @{ up = $script:ExactBinds.up; down = $script:ExactBinds.down; left = $script:ExactBinds.left; right = $script:ExactBinds.right } } |
             ConvertTo-Json | Set-Content -Path $script:SettingsFile -Encoding UTF8
     } catch { }
 }
@@ -5471,6 +5779,13 @@ try {
     # v5.17.36: галочка "Плавный стоп" (по умолчанию включена)
     if ( $s.smoothstop -ne $null ) { $script:PathSmooth = ($s.smoothstop -eq $true) }
     if ( $s.quietconsole -ne $null ) { $script:ConsoleQuiet = ($s.quietconsole -eq $true) }
+    # v5.17.42 (#14): переназначенные клавиши точных осей
+    if ( $s.exactkeys -ne $null ) {
+        foreach ( $k in @('up','down','left','right') ) {
+            $v = $s.exactkeys.$k
+            if ( $v -ne $null -and $v -ge 1 -and $v -le 255 ) { $script:ExactBinds[$k] = [int]$v }
+        }
+    }
 } catch { }
 Set-Theme ($script:StartTheme -eq "dark")
 Set-Lang $script:StartLang
