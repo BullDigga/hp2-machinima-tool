@@ -12,3 +12,5 @@ Panel/scan-cache.json
 Panel/keyframes-backup.hp2path
 Panel/restore.hp2path
 Tools/*.png
+Panel/key-times.txt
+Tools/ucc-make-out.txt
