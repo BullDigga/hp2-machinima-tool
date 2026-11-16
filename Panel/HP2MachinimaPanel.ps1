@@ -2736,14 +2736,14 @@ function Send-PathSaveAndSync([string]$prefix) {
       <TextBox Grid.Row="0" Grid.Column="1" Name="TbFov" Text="90" Width="56" Height="30" FontSize="13" Margin="0,0,0,4"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Grid.Row="0" Grid.Column="2" Name="BtnSetFov" Content="Set FOV" Height="30" Margin="6,0,0,4" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
-      <Button Grid.Row="0" Grid.Column="3" Name="BtnFovKey" Content="🎯 FOV → key" Height="30" Margin="10,0,0,4" Background="#94E2D5" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
-      <Button Grid.Row="0" Grid.Column="4" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
+      <!-- #24: "FOV -> key" removed - per-key FOV is edited in the table -->
+      <Button Grid.Row="0" Grid.Column="3" Name="BtnFovAll" Content="🌐 FOV → ALL" Height="30" Margin="6,0,0,4" Background="#89B4FA" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
       <TextBlock Grid.Row="1" Grid.Column="0" Name="TxFlySpeed" Text="✈ Fly speed" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
       <TextBox Grid.Row="1" Grid.Column="1" Name="TbSpeed" Text="600" Width="56" Height="30" FontSize="13"
                VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"/>
       <Button Grid.Row="1" Grid.Column="2" Name="BtnSpeed" Content="Set fly speed" Height="30" Margin="6,0,0,0" Background="#6C71C4" Foreground="White" ToolTipService.ShowOnDisabled="True"/>
-      <Button Grid.Row="1" Grid.Column="3" Name="BtnKeySpeed" Content="⚡ Speed → key" Height="30" Margin="10,0,0,0" Background="#F9E2AF" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
-      <Button Grid.Row="1" Grid.Column="4" Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
+      <!-- #24: "Speed -> key" removed - per-key Speed is edited in the table -->
+      <Button Grid.Row="1" Grid.Column="3" Name="BtnSpeedAll" Content="🗂 Speed → ALL" Height="30" Margin="6,0,0,0" Background="#F5C97B" Foreground="#1E1E2E" FontWeight="Bold" ToolTipService.ShowOnDisabled="True"/>
     </Grid>
 
     <!-- status + transparency -->
@@ -2783,7 +2783,7 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $controls = @{}
-foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovKey','BtnFovAll','BtnKeySpeed','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear','CbConsoleQuiet','BtnControls')) {
+foreach ($name in @('BtnHudHide','BtnPathAdd','TbSeconds','BtnPathPlay','BtnPathPlaySpeed','BtnPathStop','BtnPathClear','DgKeys','TbMapLabel','TxFramesLabel','TxSec','TxFlySpeed','BtnExport','BtnImport','BtnRefresh','TbFov','BtnSetFov','BtnFovAll','TbSpeed','BtnSpeed','BtnSpeedAll','CbTransparent','HdrGrid','BtnLang','FlagEN','FlagRU','BtnTheme','ImgOwl','ImgSwitchThumb','TbSwitchFriendly','TbSwitchTech','BtnMapSwitch','BtnKeyMapGo','BtnObsRec','TbObsRec','ImgObsLogo','BtnObsKey','BtnObsInfo','CbObsAuto','BtnObsRefresh','TbObsRefresh','CbPathSmooth','BtnHide','BtnClose','TbStatus','StatusDot','TxHkFrame','TxHkPlay','TxHkStop','TxHkClear','TxHkRefresh','BtnGithub','LogPopup','LogPopupBorder','TbLogHistory','HkChipRefresh','HkChipFrame','HkChipPlay','HkChipStop','HkChipClear','CbConsoleQuiet','BtnControls')) {
     $controls[$name] = $window.FindName($name)
 }
 
@@ -3906,17 +3906,7 @@ $controls['BtnSetFov'].Add_Click({
     Update-ParamBox "fov"
     Set-Status (Send-GameCommand "Cam_FOV $fovI")
 })
-$controls['BtnFovKey'].Add_Click({
-    $sel = $controls['DgKeys'].SelectedItem
-    $fov = $controls['TbFov'].Text.Trim()
-    if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
-    if ( $sel -ne $null ) {
-        # v5.17.2: 2 аргумента консоль теряет - пошагово FOV для выбранного кадра
-        $fv = [int][math]::Round([double]$fov)
-        $st = Send-GameCommands @("FovIdx $($sel.Num)","FovVal $fv","FovApply")
-        Send-PathSaveAndSync $st
-    } else { Set-Status "select a keyframe row first" }
-})
+# #24: BtnFovKey removed - per-key FOV is edited directly in the table
 $controls['BtnFovAll'].Add_Click({
     $fov = $controls['TbFov'].Text.Trim()
     if ($fov -notmatch '^\d+(\.\d+)?$') { $fov = "90" }
@@ -3932,17 +3922,7 @@ $controls['BtnSpeed'].Add_Click({
     Update-ParamBox "speed"
     Set-Status (Send-GameCommand "Cam_MoveSpeed $spI")
 })
-$controls['BtnKeySpeed'].Add_Click({
-    $sel = $controls['DgKeys'].SelectedItem
-    $sp = $controls['TbSpeed'].Text.Trim()
-    if ($sp -notmatch '^\d+(\.\d+)?$') { $sp = "250" }
-    if ( $sel -ne $null ) {
-        # v5.17.2: пошагово скорость для выбранного кадра
-        $sv = [int][math]::Round([double]$sp)
-        $st = Send-GameCommands @("SpeedIdx $($sel.Num)","SpeedVal $sv","SpeedApply")
-        Send-PathSaveAndSync $st
-    } else { Set-Status "select a keyframe row first" }
-})
+# #24: BtnKeySpeed removed - per-key Speed is edited directly in the table
 # применить скорость из бокса ко ВСЕМ кадрам: пачка staged-команд за одну сессию консоли
 $controls['BtnSpeedAll'].Add_Click({
     $sp = $controls['TbSpeed'].Text.Trim()
@@ -4500,7 +4480,11 @@ function Switch-ToMap([string]$map) {
             return
         }
         Set-Status ("switching to " + $map + "...")
-        $st = Send-GameCommand ("open " + $map)
+        # v5.17.44 (#22): open - ЧЕРЕЗ ФАЙЛОВЫЙ КАНАЛ. Живой факт (репорт юзера):
+        # напечатанное "open Grounds_hub" потеряло хвост символов при лаге ->
+        # движок исполнил "open Ground" и загрузил тестовый Ground.unr. Файл
+        # исполняет движок через ConsoleCommand - аргументы не теряются
+        $st = Send-BatchViaFile @("open " + $map)
         Set-Status ($st + " | " + $(if ( $script:Lang -eq "ru" ) { "РєР°СЂС‚Р° " } else { "map " }) + $map)
         # v5.17.30.2: ЖИВОЙ ФАКТ - печать open дошла до консоли игры (PING-маркер
         # в буфере), но карта НЕ сменилась (exec видимо потерял текст/аргумент).
@@ -4514,7 +4498,7 @@ function Switch-ToMap([string]$map) {
             try {
                 if ( $script:CurrentMap -ne $mapFrom -and $script:CurrentMap -ne "" ) { return }   # грузится/загрузилась
                 Set-Status ("map did not load - retrying open " + $map + "...") "warn"
-                $st2 = Send-GameCommand ("open " + $map)
+                $st2 = Send-BatchViaFile @("open " + $map)   # v5.17.44: файловый канал (аргументы не теряются)
                 Set-Status ($st2 + " | retry map " + $map)
             } catch { }
         })
@@ -5492,13 +5476,13 @@ $controls['LogPopupBorder'].Add_MouseEnter({ $script:LogCloseTimer.Stop() })
 $controls['LogPopupBorder'].Add_MouseLeave({ $script:LogCloseTimer.Stop(); $script:LogCloseTimer.Start() })
 
 # ---------- v5.8: кнопки, требующие выбранный кадр / наличие кадров ----------
-$script:SelDep = @('BtnFovKey','BtnKeySpeed')
+$script:SelDep = @()   # #24: per-key buttons removed, edits live in the table
 $script:KeysDep = @('BtnFovAll','BtnSpeedAll','BtnExport','BtnPathPlay','BtnPathPlaySpeed')
 # v5.15: блокируется, пока игра не загружена на какой-либо карте
-$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed','BtnRefresh')
+$script:NoGameDep = @('BtnHudHide','BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnSetFov','BtnFovAll','BtnSpeed','BtnSpeedAll','BtnExport','BtnImport','TbFov','TbSpeed','BtnRefresh')
 # v5.12: во время воспроизведения блокируется всё, кроме Стопа, Плея (повторного), поля
 # секунд и Экспорта; тема/язык/прозрачность (UI) остаются доступны
-$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovKey','BtnFovAll','BtnSpeed','BtnKeySpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
+$script:PlayLock = @('BtnPathAdd','BtnHudHide','BtnPathClear','BtnSetFov','BtnFovAll','BtnSpeed','BtnSpeedAll','BtnImport','BtnRefresh','TbFov','TbSpeed','DgKeys')
 $script:DgWasDisabled = $false   # v5.17.32.1: таблица была выключена (для разового Items.Refresh)
 function Update-SelectionButtons {
     # v5.17.27: карточка карты живёт в тех же состояниях (chip-only при выключенной
@@ -5573,7 +5557,7 @@ function Update-SelectionButtons {
         # v5.17.30: расширенный лок - FOV/Speed->ALL тоже пишут в путь игры, а он на
         # другой карте пуст; таблица замораживается целиком (строки чужой карты видны,
         # но edit/goto/trash на них идти не должны - goto/вставка считаются по пути игры)
-        foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovKey','BtnKeySpeed','BtnFovAll','BtnSpeedAll')) ) {
+        foreach ( $b in ($script:SelDep + @('BtnPathAdd','BtnPathPlay','BtnPathPlaySpeed','BtnFovAll','BtnSpeedAll')) ) {
             Set-CtlEnabled $b $false
         }
         try {
@@ -5623,15 +5607,12 @@ function Update-SelectionButtons {
     Set-CtlEnabled 'BtnPathClear' ($n -gt 0)
     $controls['BtnPathStop'].IsEnabled = $false
     # v5.17.6: FOV->key / Speed->key серые, если выбранная строка УЖЕ имеет значение из поля
-    try {
-        $selRow = $controls['DgKeys'].SelectedItem
-        if ( $selRow -ne $null ) {
-            $fovTxt = $controls['TbFov'].Text.Trim()
-            $spdTxt = $controls['TbSpeed'].Text.Trim()
-            Set-CtlEnabled 'BtnFovKey' ( ($fovTxt -match '^\d+(\.\d+)?$') -and ([double]$fovTxt -ne $selRow.FOV) )
-            Set-CtlEnabled 'BtnKeySpeed' ( ($spdTxt -match '^\d+(\.\d+)?$') -and ([double]$spdTxt -ne $selRow.Speed) )
-        }
-    } catch { }
+        try {
+            $selRow = $controls['DgKeys'].SelectedItem
+            if ( $selRow -ne $null ) {
+                # #24: BtnFovKey/BtnKeySpeed removed - per-key values edit in the table
+            }
+        } catch { }
     # v5.17.7: FOV->ALL / Speed->ALL серые, если во ВСЕХ кадрах уже стоит значение из
     # поля (сравниваем с тем, что реально уйдёт в игру - округлённый int, как в хендлерах)
     try {
@@ -6060,10 +6041,8 @@ function Set-Lang([string]$lang) {
     $controls['BtnExport'].Content = $L.Export
     $controls['BtnImport'].Content = $L.Import
     $controls['BtnSetFov'].Content = $L.SetFov
-    $controls['BtnFovKey'].Content = $L.FovKey
     $controls['BtnFovAll'].Content = $L.FovAll
     $controls['BtnSpeed'].Content = $L.SetSpeed
-    $controls['BtnKeySpeed'].Content = $L.SpeedKey
     $controls['BtnSpeedAll'].Content = $L.SpeedAll
     $controls['CbTransparent'].Content = $L.Transparent
     $controls['TxHkFrame'].Text = $L.HkFrame
@@ -6079,7 +6058,6 @@ function Set-Lang([string]$lang) {
     # v5.17.30: подкнопка "вернуться к кадрам" - перерисовать контент под язык
     Update-KeyMapGoButton
     # подсказки на серых кнопках
-    foreach ( $b in @('BtnFovKey','BtnKeySpeed') ) { $controls[$b].ToolTip = $L.TipSelect }
     foreach ( $b in @('BtnSetFov','BtnSpeed') ) { $controls[$b].ToolTip = $L.TipEdit }
     # v5.17.31 (#5): инструкция настройки OBS на кнопке "i" + тултип кнопки-ключа
     $controls['BtnObsInfo'].ToolTip = $L.TipObsInfo
